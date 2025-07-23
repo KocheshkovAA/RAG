@@ -1,0 +1,20 @@
+version: "3.9"
+
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
+    volumes:
+      - ./chroma_db:/app/chroma_db
+
+  bot:
+    build: .
+    command: ["python", "app/bot.py"]
+    depends_on:
+      - api
+    environment:
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
+      - RAG_API_URL=http://api:8000/ask
