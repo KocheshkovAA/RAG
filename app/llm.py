@@ -1,5 +1,5 @@
 from langchain_community.chat_models import ChatOpenAI
-from langchain_community.chat_models import ChatOllama
+from langchain_ollama import ChatOllama
 from app.config import OPENROUTER_API_KEY, LLM_MODEL_NAME, OPENROUTER_API_BASE
 
 def get_llm():

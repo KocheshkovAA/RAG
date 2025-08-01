@@ -16,13 +16,10 @@ class TelegramMarkdownFormatter:
             
         truncated = cls._truncate(text)
 
-        # Сначала сохраняем код-блоки
         text = cls._preserve_code_blocks(truncated)
         
-        # Обрабатываем основной текст
         formatted = cls._process_text(text)
         
-        # Восстанавливаем код-блоки
         formatted = cls._restore_code_blocks(formatted)
         
         return formatted

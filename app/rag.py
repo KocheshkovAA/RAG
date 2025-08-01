@@ -1,9 +1,9 @@
-from langchain.chains import RetrievalQA
-from langchain.chains.question_answering import load_qa_chain
-from langchain.prompts import PromptTemplate
 from app.config import MAX_RESPONSE_LENGTH
+from langchain_core.prompts import ChatPromptTemplate
+from langchain.chains import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
 
-TELEGRAM_PROMPT_TEMPLATE = """Ты AI-ассистент, отвечающий на вопросы. Формат ответа:
+TELEGRAM_PROMPT_TEMPLATE = """Ты AI-ассистент, отвечающий на вопросы про warhammer 40000. Формат ответа:
 
 1. **Основные требования**:
    - Язык: русский
@@ -20,26 +20,17 @@ TELEGRAM_PROMPT_TEMPLATE = """Ты AI-ассистент, отвечающий �
 
 Контекст: {context}
 
-Вопрос: {question}
+Вопрос: {input}
 
 Сформулируй четкий ответ:"""
 
 def build_rag_chain(llm, retriever):
-    prompt = PromptTemplate(
-        template=TELEGRAM_PROMPT_TEMPLATE,
-        input_variables=["context", "question"],
+    prompt = ChatPromptTemplate.from_template(
+        TELEGRAM_PROMPT_TEMPLATE,
         partial_variables={"max_length": str(MAX_RESPONSE_LENGTH)}
     )
-
-    combine_documents_chain = load_qa_chain(
-        llm=llm.bind(max_length=MAX_RESPONSE_LENGTH),
-        chain_type="stuff", 
-        prompt=prompt
-    )
-
-    return RetrievalQA(
-        retriever=retriever,
-        combine_documents_chain=combine_documents_chain,
-        return_source_documents=True,
-        input_key="question"
-    )
+    
+    document_chain = create_stuff_documents_chain(llm, prompt)
+    retrieval_chain = create_retrieval_chain(retriever, document_chain)
+    
+    return retrieval_chain

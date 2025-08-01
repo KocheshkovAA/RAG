@@ -1,9 +1,13 @@
 FROM python:3.10-slim
 
 WORKDIR /app
-COPY . /app
 
-RUN pip install --upgrade pip
-RUN pip install -r requirements.txt
+# Установка зависимостей (кешируемый слой)
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-CMD ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "8000"]
+ENV ANONYMOUS_TELEMETRY_DISABLED=True
+ENV CHROMA_TELEMETRY_ENABLED=False
+
+CMD ["python", "bot.py"]
