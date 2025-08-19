@@ -8,5 +8,5 @@ def get_llm():
         #openai_api_key=OPENROUTER_API_KEY,
         #openai_api_base=OPENROUTER_API_BASE,
         base_url="http://localhost:11434",
-        temperature=0.15
+        temperature=0.12
     )

@@ -3,26 +3,22 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 
-TELEGRAM_PROMPT_TEMPLATE = """Ты AI-ассистент, отвечающий на вопросы про warhammer 40000. Формат ответа:
+TELEGRAM_PROMPT_TEMPLATE = """Ты эксперт по вселенной Warhammer 40,000.
 
-1. **Основные требования**:
-   - Язык: русский
-   - Текст: простой текст без форматирования
-   - Длина: не более {max_length} символов
-   - Четкая структура: используй списки и короткие абзацы
+Используй приведённый контекст, чтобы ответить на вопрос. Отвечай на русском языке.
 
-2. **Как оформлять ответ**:
-   - Главную мысль выделяй первым тезисом
-   - Дополнительные пункты оформляй списком
-   - Каждый пункт списка - одна законченная мысль
-   - Между абзацами оставляй пустую строку
-   - Избегай сложных конструкций
+- Если контекст пустой, то отвечай, что не знаешь ответа.
+- Максимальная длина ответа: {max_length} символов
+- Не упоминай в ответе вопрос и контекст
 
-Контекст: {context}
+Контекст:
+{context}
 
-Вопрос: {input}
+Вопрос:
+{input}
 
-Сформулируй четкий ответ:"""
+Ответ:
+"""
 
 def build_rag_chain(llm, retriever):
     prompt = ChatPromptTemplate.from_template(
