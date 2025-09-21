@@ -4,25 +4,60 @@ from app.config import MAX_MESSAGE_LENGTH
 
 class TelegramMarkdownFormatter:
     """Форматирование текста для Telegram MarkdownV2"""
-    
+
     _ESCAPE_CHARS = '_[]()~`>#+-=|{}.!'
     _CODE_BLOCK_PATTERN = r'```(.*?)```'
-    
+    _code_blocks: List[str] = []
+
     @classmethod
     def format(cls, text: str) -> str:
-        """Основной метод форматирования текста"""
+        """Форматирует текст и возвращает одну строку"""
         if not text:
             return text
-            
-        truncated = cls._truncate(text)
 
-        text = cls._preserve_code_blocks(truncated)
-        
+        text = cls._preserve_code_blocks(text)
         formatted = cls._process_text(text)
-        
         formatted = cls._restore_code_blocks(formatted)
-        
         return formatted
+
+    @classmethod
+    def format_into_chunks(cls, text: str, max_length: int = MAX_MESSAGE_LENGTH) -> List[str]:
+        """Форматирует текст и разбивает его на чанки для Telegram так,
+        чтобы не резать ссылки и другие сущности"""
+        formatted = cls.format(text)
+        chunks = []
+
+        while formatted:
+            if len(formatted) <= max_length:
+                chunks.append(formatted)
+                break
+
+            # Берём кусок до max_length
+            cut = formatted[:max_length]
+
+            # Проверяем, не разорвали ли ссылку [text](url)
+            last_open = cut.rfind("[")
+            last_close = cut.rfind(")")
+
+            if last_open != -1 and (last_close == -1 or last_close < last_open):
+                # Нашли начало ссылки, но не конец — обрезаем до last_open
+                cut = cut[:last_open]
+
+            # Если вдруг отрезали слишком мало (например, из-за длинной ссылки),
+            # тогда лучше взять полный URL и перенести в следующий чанк
+            if not cut.strip():
+                # Находим конец ссылки за пределами max_length
+                end_link = formatted.find(")", max_length)
+                if end_link != -1:
+                    cut = formatted[:end_link+1]
+                else:
+                    cut = formatted[:max_length]  # fallback
+
+            chunks.append(cut)
+            formatted = formatted[len(cut):]
+
+        return chunks
+
     
     @classmethod
     def _preserve_code_blocks(cls, text: str) -> str:

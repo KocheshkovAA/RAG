@@ -1,207 +1,167 @@
-import re
-import pickle
 import logging
-from pathlib import Path
 from typing import List
-
-from pymorphy2 import MorphAnalyzer
-from pydantic import Field
 from langchain_core.documents import Document
-from langchain_community.retrievers import BM25Retriever
+from langchain_chroma import Chroma
 from langchain.schema import BaseRetriever
-from sentence_transformers import CrossEncoder
-from sklearn.feature_extraction.text import TfidfVectorizer
-from stop_words import get_stop_words
+from pydantic import Field
+from app.embedding_model import MLMEmbeddings
+from app.NER import normalize_text_entities
+from app.config import EMBEDDING_MODEL_NAME, CHROMA_PERSIST_DIR
+from app.llm_tools.query_normalizer import split_and_extract_entities  # твой модуль для вопросов
+from app.graph.node import get_node_info, calculate_graph_metrics
 
-from app.config import CHROMA_PERSIST_DIR
-
+from collections import defaultdict, Counter
 logger = logging.getLogger(__name__)
 
-VECTORSTORE_FILE = CHROMA_PERSIST_DIR / "bm25_vectorstore.pkl"
-morph = MorphAnalyzer()
+# --- эмбеддинги ---
+embedding_model = MLMEmbeddings(EMBEDDING_MODEL_NAME)
 
-# ---------- базовые утилиты ----------
-def _tokenize_ru(text: str) -> list[str]:
-    # токенизация + лемматизация; отбрасываем очень короткие токены
-    return [morph.parse(w)[0].normal_form
-            for w in re.findall(r"\w+", text.lower())
-            if len(w) > 2]
+class HybridRetriever(BaseRetriever):
+    vectorstore: Chroma = Field(...)
 
-def lemmatize_text(text: str) -> str:
-    return " ".join(_tokenize_ru(text))
-
-# ---------- BM25 индекс ----------
-def build_bm25_retriever(documents: list[Document]) -> BM25Retriever:
-    if VECTORSTORE_FILE.exists():
-        logger.info("Loading an existing BM25 retriever")
-        with open(VECTORSTORE_FILE, "rb") as f:
-            return pickle.load(f)
-
-    logger.info("Building a new BM25 retriever")
-
-    lemmatized_docs = [
-        Document(
-            page_content=lemmatize_text(doc.page_content),
-            metadata={"original": doc.page_content, **doc.metadata}
-        )
-        for doc in documents
-    ]
-
-    
-
-    retriever = BM25Retriever.from_documents(lemmatized_docs)
-    retriever.k = 200
-
-    CHROMA_PERSIST_DIR.mkdir(parents=True, exist_ok=True)
-    with open(VECTORSTORE_FILE, "wb") as f:
-        pickle.dump(retriever, f)
-
-    return retriever
-
-# ---------- PRF на TF-IDF ----------
-def _build_prf_expansion_terms(
-    query: str,
-    docs: List[Document],
-    top_terms: int = 8,
-) -> list[str]:
-    """
-    Возвращает список терминов (леммы) для расширения запроса.
-    Используем TF-IDF по top-N документах.
-    """
-    if not docs:
-        return []
-
-    # корпус = тексты top-N (оригиналы, а не лемматизированные)
-    texts = [d.metadata.get("original", d.page_content) for d in docs]
-
-    # Векторизатор: используем наш токенизатор, без стоп-слов (они уже выпиливаются лемматизацией и df)
-
-    russian_stopwords = set(get_stop_words("ru")) | {"заголовок", "статья"} 
-    vectorizer = TfidfVectorizer(tokenizer=_tokenize_ru, lowercase=True, stop_words=russian_stopwords)
-    tfidf = vectorizer.fit_transform(texts)  # shape: (N_docs, V)
-
-    # Средний вес термина по всем документах (centroid в терм-пространстве TF-IDF)
-    mean_scores = tfidf.mean(axis=0).A1  # -> np.array shape (V,)
-    vocab = vectorizer.get_feature_names_out()
-
-    # термины исходного запроса (чтобы не дублировать)
-    q_terms = set(_tokenize_ru(query))
-
-    # сортируем по весу, исключая термины из запроса
-    ranked = [(term, score) for term, score in zip(vocab, mean_scores) if term not in q_terms]
-    ranked.sort(key=lambda x: x[1], reverse=True)
-
-    return [t for t, _ in ranked[:top_terms]]
-
-def _expand_query_with_terms(
-    query: str,
-    terms: list[str],
-    weights: list[float] | None = None,
-    max_repeat: int = 3,
-) -> str:
-    """
-    Для BM25 нет явных весов, поэтому моделируем веса повторением терминов.
-    Если weights не заданы — используем единичные.
-    """
-    if not terms:
-        return query
-
-    if weights is None:
-        weights = [1.0] * len(terms)
-
-    # нормируем в [0, 1]
-    w_min, w_max = min(weights), max(weights)
-    if w_max == w_min:
-        reps = [1] * len(terms)
-    else:
-        reps = [1 + int((w - w_min) / (w_max - w_min) * (max_repeat - 1)) for w in weights]
-
-    expanded_tail = []
-    for term, r in zip(terms, reps):
-        expanded_tail.extend([term] * r)
-
-    return (query + " " + " ".join(expanded_tail)).strip()
-
-# ---------- Каскад: BM25 → PRF(BM25) → CrossEncoder ----------
-class BM25PrfRerankRetriever(BaseRetriever):
-    bm25_retriever: BM25Retriever = Field(...)
-    reranker: CrossEncoder = Field(...)
-
-    # Stage 1: начальный BM25
-    top_k_stage1: int = Field(default=200)
-
-    # PRF параметры
-    prf_enable: bool = Field(default=True)
-    prf_top_docs: int = Field(default=10)   # на скольких документах считаем TF-IDF
-    prf_top_terms: int = Field(default=8)   # сколько слов добавить
-    prf_max_repeat: int = Field(default=3)  # макс. кратность добавления термина
-
-    # Stage 2: финальный срез + порог
-    top_k_final: int = Field(default=20)
-    score_threshold: float = Field(default=0.3)
-
-    def _stage1(self, query: str) -> List[Document]:
-        return self.bm25_retriever.get_relevant_documents(lemmatize_text(query))[:self.top_k_stage1]
-
-    def _apply_prf(self, query: str, candidates: List[Document]) -> str:
-        if not self.prf_enable:
-            return query
-        top_for_prf = candidates[: self.prf_top_docs]
-        terms = _build_prf_expansion_terms(query, top_for_prf, top_terms=self.prf_top_terms)
-
-        # можно прокинуть веса (если захочешь) — сейчас используем равные
-        q_expanded = _expand_query_with_terms(
-            query=query,
-            terms=terms,
-            weights=None,
-            max_repeat=self.prf_max_repeat
-        )
-        return q_expanded
-
-    def _stage2(self, query: str) -> List[Document]:
-        # повторный BM25 уже по расширенному запросу
-        return self.bm25_retriever.get_relevant_documents(lemmatize_text(query))[:self.top_k_stage1]
+    top_k_vector: int = Field(default=50)
+    top_k_final: int = Field(default=10)
 
     def _get_relevant_documents(self, query: str) -> List[Document]:
-        # 1) первичный BM25
-        initial = self._stage1(query)
+        """
+        Извлекает под-вопросы и сущности из исходного вопроса, ищет релевантные документы 
+        по под-вопросам и по сущностям, сортирует по графовой связанности.
+        """
+        # 1) Разбиваем вопрос и извлекаем сущности только для исходного вопроса
+        parsed = split_and_extract_entities(query)
+        #parsed = {'entities': ['Аба́ддон', 'Жиллима́н'], 'questions': [{'text': 'Кто такой Аба́ддон?'}, {'text': 'Какие способности и качества есть у Аба́ддона?'}, {'text': 'Кто такой Жиллима́н?'}, {'text': 'Какие способности и качества есть у Жиллима́на?'}, {'text': 'Кого традиционно считают победителем в битве между Аба́ддоном и Жиллима́ном?'}]}
+        print(parsed)
+        questions = parsed.get("questions", [])
+        questions.append({"text": query})
+        all_entities = set(parsed.get("entities", []))
 
-        # 2) PRF: строим q'
-        q_prime = self._apply_prf(query, initial)
-        print(q_prime)
+        if not questions:
+            logger.warning(f"Не удалось извлечь сущности из запроса: {query}")
+            return self.vectorstore.similarity_search(query, k=self.top_k_vector)
 
-        # 3) вторичный BM25 на q'
-        candidates = self._stage2(q_prime)
+        docs_collected = []
 
-        # 4) реранкинг CrossEncoder (по ОРИГИНАЛАМ текстов)
-        pairs = [(query, doc.metadata.get("original", doc.page_content)) for doc in candidates]
-        scores = self.reranker.predict(pairs)
+        # 2) Поиск по под-вопросам
+        for q in questions:
+            sub_query = q.get("text", "").strip()
+            if sub_query:
+                results = self.vectorstore.similarity_search_with_score(sub_query, k=self.top_k_vector)
+                docs_collected.extend([(doc, score) for doc, score in results])
 
-        reranked = [
-            (Document(page_content=doc.metadata.get("original", doc.page_content), metadata=doc.metadata), score)
-            for doc, score in zip(candidates, scores)
-            if score >= self.score_threshold
+        # 3) Поиск по сущностям (только из исходного вопроса)
+        for ent in all_entities:
+            if not ent.strip():
+                continue
+            results = self.vectorstore.similarity_search_with_score(normalize_text_entities(ent.strip()), k=self.top_k_vector)
+            docs_collected.extend([(doc, score) for doc, score in results])
+
+        doc_to_chunks = defaultdict(list)
+        seen_chunks = set()
+
+        for chunk, score in docs_collected:
+            doc_title = chunk.metadata.get("title", "Без названия")
+            key = (doc_title, chunk.page_content.strip())  # уникальность по названию + тексту чанка
+            if key in seen_chunks:
+                continue
+            seen_chunks.add(key)
+            doc_to_chunks[doc_title].append((chunk, score))
+
+
+        # 5) Проверка на графовую связанность
+        # 5) Проверка на графовую связанность
+        candidate_nodes = list(doc_to_chunks.keys())
+        node_scores, paths_dict, intermediate_nodes = calculate_graph_metrics(candidate_nodes, max_length=5)
+
+        # фильтруем узлы без связей
+        filtered_titles = [
+            title for title in candidate_nodes
+            if node_scores.get(title, 0.0) > 0
         ]
-        reranked.sort(key=lambda x: x[1], reverse=True)
-        return [doc for doc, _ in reranked[: self.top_k_final]]
 
-# ---------- фабрика ----------
-def build_or_load_vectorstore(documents: list[Document]) -> BM25PrfRerankRetriever:
-    logger.info("Create or download Cascade Retriever (BM25 → PRF → Reranker)")
+        # если все нули — берем все узлы
+        if not filtered_titles:
+            filtered_titles = candidate_nodes
 
-    bm25_retriever = build_bm25_retriever(documents)
+        merged_docs = []
+        for title in filtered_titles:
+            chunks_scores = doc_to_chunks[title]
 
-    logger.info("Load CrossEncoder (reranker)")
-    reranker = CrossEncoder("BAAI/bge-reranker-v2-m3")
+            # Берём метадату из первого чанка
+            first_chunk, _ = chunks_scores[0]
+            base_metadata = first_chunk.metadata.copy()
 
-    return BM25PrfRerankRetriever(
-        bm25_retriever=bm25_retriever,
-        reranker=reranker,
-        top_k_stage1=50,
-        top_k_final=6,
-        prf_enable=True,
-        prf_top_docs=30,
-        prf_top_terms=7,
-        prf_max_repeat=3,
-        score_threshold=0.3,
+            # добавляем графовую информацию
+            graph_info = get_node_info(title)
+            merged_text_parts = []
+            if graph_info:
+                merged_text_parts.append(f"[Graph Info: {graph_info}]")
+
+            merged_text_parts.extend(chunk.page_content for chunk, _ in chunks_scores)
+            merged_text = "\n".join(merged_text_parts)
+
+            merged_docs.append(
+                Document(
+                    page_content=merged_text,
+                    metadata=base_metadata
+                )
+            )
+
+        if intermediate_nodes:
+            for interm_node in intermediate_nodes:
+                node_info_text = get_node_info(interm_node) or ""
+                merged_docs.append(
+                    Document(
+                        page_content=f"[Intermediate Node: {interm_node}]\n{node_info_text}",
+                        metadata={
+                            "title": interm_node
+                        }
+                    )
+                )
+
+        # --- Формируем отдельный чанк с путями между найденными узлами ---
+        if paths_dict:
+            path_lines = []
+            for (node1, node2), path in paths_dict.items():
+                # чтобы не дублировать симметричные пути, можно проверять node1 < node2
+                if node1 < node2:
+                    path_lines.append(" ".join(path))
+            paths_text = "\n".join(path_lines)
+            merged_docs.append(
+                Document(
+                    page_content=f"[Graph Paths]\n{paths_text}",
+                    metadata={"title": "Graph Paths", "type": "graph_paths"}
+                )
+            )
+
+        # сортировка документов по графовому весу
+        merged_docs.sort(
+            key=lambda doc: node_scores.get(doc.metadata.get("title", ""), 0.0),
+            reverse=True
+        )
+
+        logger.info(f"Total connected documents: {len(merged_docs)} / {len(candidate_nodes)}")
+        return merged_docs[:self.top_k_final]
+
+
+def build_or_load_vectorstore(documents: List[Document]) -> HybridRetriever:
+    logger.info("Building Chroma vectorstore")
+    CHROMA_PERSIST_DIR.mkdir(parents=True, exist_ok=True)
+    if any(CHROMA_PERSIST_DIR.iterdir()):
+        logger.info("Loading existing Chroma vectorstore")
+        vectorstore = Chroma(
+            persist_directory=str(CHROMA_PERSIST_DIR),
+            embedding_function=embedding_model,
+        )
+    else:
+        logger.info("Building new Chroma vectorstore")
+        vectorstore = Chroma.from_documents(
+            documents=documents,
+            embedding=embedding_model,
+            persist_directory=str(CHROMA_PERSIST_DIR),
+        )
+
+    return HybridRetriever(
+        vectorstore=vectorstore,
+        top_k_vector=6,
+        top_k_final=10,
     )

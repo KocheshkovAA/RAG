@@ -35,6 +35,8 @@ class WarhammerDatabase:
             content TEXT NOT NULL,
             content_length INTEGER,
             article_url TEXT NOT NULL,
+            entities TEXT,
+            wikitext TEXT,
             redirects_count INTEGER DEFAULT 0,
             last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(final_title)
@@ -69,42 +71,52 @@ class WarhammerDatabase:
         self.conn.commit()
         logger.info("Database tables created/verified")
 
-    def save_article(self, original_title, final_title, content, redirects=0):
-        cursor = self.conn.cursor()
-        
+    def save_article(self, original_title, final_title, content, redirects=0, wikitext=""):
+        # Извлекаем ссылки из wikitext
+        links = re.findall(r'\[\[(.*?)\]\]', wikitext)
+        clean_links = []
+        for l in links:
+            l = l.split("|")[0].strip()
+            if l.lower().startswith("файл:") or l.lower().startswith("image:"):
+                continue
+            if l.lower().startswith("категория:"):
+                continue
+            clean_links.append(l)
+        entities_str = ",".join(sorted(set(clean_links)))
+
         try:
-            # Формируем безопасный URL статьи
             safe_title = quote(final_title.replace(' ', '_'))
             article_url = f"https://warhammer40k.fandom.com/ru/wiki/{safe_title}"
-            
-            # Insert or update article с новым полем article_url
+
+            # Сохраняем и очищенный текст, и wikitext
+            cursor = self.conn.cursor()
             cursor.execute('''
             INSERT OR REPLACE INTO articles 
-            (original_title, final_title, article_url, content, content_length, redirects_count)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ''', (original_title, final_title, article_url, content, len(content), redirects))
+            (original_title, final_title, article_url, content, content_length, redirects_count, entities, wikitext)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (original_title, final_title, article_url, content, len(content), redirects, entities_str, wikitext))
             
-            # Получаем ID статьи
             article_id = cursor.lastrowid
             if article_id == 0:
                 cursor.execute('SELECT id FROM articles WHERE final_title = ?', (final_title,))
                 article_id = cursor.fetchone()[0]
-            
+
             # Извлекаем и сохраняем источники
             self._extract_and_save_sources(cursor, article_id, content)
-            
-            # Обновляем индекс полнотекстового поиска
+
+            # Обновляем FTS
             cursor.execute('''
             INSERT OR REPLACE INTO articles_fts (rowid, title, content)
             VALUES (?, ?, ?)
             ''', (article_id, final_title, content))
-            
+
             self.conn.commit()
-            logger.debug(f"Successfully saved article: {final_title} ({article_url})")
+            logger.debug(f"Saved article: {final_title} with {len(clean_links)} entities")
             return True
         except sqlite3.Error as e:
             logger.error(f"Error saving article {final_title}: {e}")
             return False
+
 
     def _extract_and_save_sources(self, cursor, article_id, content):
         """Extracts and saves sources from article content"""
@@ -168,20 +180,19 @@ class FandomParser:
         })
         logger.info("FandomParser initialized")
 
-    def get_article_text(self, title, max_redirects=3, redirect_chain=None):
-        """Recursively gets article text with redirect handling"""
+    def get_article_text(self, title, max_redirects=300, redirect_chain=None):
         if redirect_chain is None:
             redirect_chain = []
-            
+
         if max_redirects <= 0:
             logger.warning(f"Redirect limit reached for: {title}")
-            return None, redirect_chain
+            return None, "", redirect_chain
 
         params = {
             "action": "parse",
             "page": title,
             "format": "json",
-            "prop": "text|redirects",
+            "prop": "text|wikitext|redirects",  # добавили wikitext
             "disabletoc": 1,
             "redirects": True
         }
@@ -193,31 +204,33 @@ class FandomParser:
 
             if "error" in data:
                 logger.error(f"API error for '{title}': {data['error']['info']}")
-                return None, redirect_chain
+                return None, "", redirect_chain
 
             parse_data = data.get("parse", {})
-            
-            # Handle redirects
+
+            # Redirects
             if "redirects" in parse_data and parse_data["redirects"]:
                 new_title = parse_data["redirects"][0]["to"]
                 logger.info(f"Redirect: {title} → {new_title}")
                 redirect_chain.append((title, new_title))
                 return self.get_article_text(new_title, max_redirects-1, redirect_chain)
 
-            # Get content
             html_content = parse_data.get("text", {}).get("*")
+            wikitext = parse_data.get("wikitext", {}).get("*", "")
+
             if not html_content:
                 logger.warning(f"Empty content for: {title}")
-                return None, redirect_chain
+                return None, wikitext, redirect_chain
 
-            return self.clean_html(html_content), redirect_chain
+            return self.clean_html(html_content), wikitext, redirect_chain
 
         except requests.exceptions.RequestException as e:
             logger.error(f"Network error for '{title}': {str(e)}")
-            return None, redirect_chain
+            return None, "", redirect_chain
         except Exception as e:
             logger.error(f"Unexpected error for '{title}': {str(e)}", exc_info=True)
-            return None, redirect_chain
+            return None, "", redirect_chain
+
 
     def clean_html(self, html):
         """Cleans HTML and extracts text"""
@@ -273,7 +286,7 @@ class FandomParser:
                     break
                     
                 params.update(data["continue"])
-                time.sleep(1.5)
+                time.sleep(1.1)
 
         except Exception as e:
             logger.error(f"Error fetching article list: {str(e)}", exc_info=True)
@@ -291,7 +304,7 @@ class FandomParser:
                 start_time = time.time()
                 
                 # Get text and redirect history
-                content, redirects = self.get_article_text(title)
+                content, wikitext, redirects = self.get_article_text(title)
                 
                 if content:
                     # Determine final title (after all redirects)
@@ -302,7 +315,8 @@ class FandomParser:
                         original_title=title,
                         final_title=final_title,
                         content=content,
-                        redirects=len(redirects)
+                        redirects=len(redirects), 
+                        wikitext=wikitext
                     ):
                         success_count += 1
                 
@@ -325,10 +339,10 @@ def resume_from_article(start_title, limit=None):
     try:
         db = WarhammerDatabase()
         parser = FandomParser(db)
-        
+
         # Get all articles
         all_articles = parser.fetch_all_articles()
-        
+
         # Find starting position
         try:
             start_idx = all_articles.index(start_title) + 1  # Start from next article
@@ -337,25 +351,44 @@ def resume_from_article(start_title, limit=None):
             logger.error(f"Article '{start_title}' not found in list")
             return
 
-        # Process remaining articles
+        # Select subset of articles
         articles_to_process = all_articles[start_idx:start_idx+limit] if limit else all_articles[start_idx:]
         total_count = len(all_articles)
-        
-        for i, title in enumerate(articles_to_process, start_idx+1):
+        success_count = 0
+
+        for i, title in enumerate(articles_to_process, start=start_idx + 1):
             try:
                 start_time = time.time()
-                content, redirects = parser.get_article_text(title)
-                
+
+                # Получаем текст, wikitext и цепочку редиректов
+                content, wikitext, redirects = parser.get_article_text(title)
+
                 if content:
+                    # финальный тайтл (после всех редиректов)
                     final_title = redirects[-1][1] if redirects else title
-                    db.save_article(title, final_title, content, len(redirects))
-                
-                logger.info(f"[{i}/{total_count}] Processed: {title} ({time.time()-start_time:.1f}s)")
-                time.sleep(1.5)
-                
+
+                    # сохраняем статью
+                    if db.save_article(
+                        original_title=title,
+                        final_title=final_title,
+                        content=content,
+                        redirects=len(redirects),
+                        wikitext=wikitext
+                    ):
+                        success_count += 1
+
+                elapsed = time.time() - start_time
+                logger.info(f"[{i}/{total_count}] {'✓' if content else '✗'} {title} ({elapsed:.1f}s)")
+
+                time.sleep(1.5)  # Crawl delay
+
             except Exception as e:
-                logger.error(f"Error processing {title}: {str(e)}")
-                time.sleep(5)  # Longer delay on error
+                logger.error(f"Error processing {title}: {str(e)}", exc_info=True)
+                time.sleep(5)  # Подольше ждем при ошибке
+
+        # Записываем результат
+        db.log_update(success_count)
+        logger.info(f"Resumed parsing complete! Successfully saved {success_count}/{len(articles_to_process)} articles")
 
     except Exception as e:
         logger.critical(f"Fatal error: {str(e)}", exc_info=True)
@@ -363,8 +396,6 @@ def resume_from_article(start_title, limit=None):
         if 'db' in locals():
             db.conn.close()
 
+
 if __name__ == "__main__":
-    db = WarhammerDatabase()
-    parser = FandomParser(db)
-    parser.process_and_save_articles()  # загрузит все статьи по умолчанию (limit=None)
-    db.close()
+    resume_from_article("Линейный флот Коронус", 50000)

@@ -1,4 +1,18 @@
 /chroma_db
+/checkpoints_ft_gemma
+/cross_encoder_finetuned
+/tokenized_warhammer_pairs
+/tokenized_warhammer_pairs_2
+/wh_sentence_model_ft
+/wh_sentence_model_ft_gemma
 
 *.db
 *.log
+*.csv
+*.json
+*.jsonl
+*.pkl
+*.pt
+*.txt
+*.npz
+*.pth
