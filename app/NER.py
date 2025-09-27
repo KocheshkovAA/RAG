@@ -191,9 +191,9 @@ def merge_entities(entities: List[Entity]) -> List[Entity]:
 
 # ---------- Основная функция ----------
 def extract_entities(text: str) -> List[Entity]:
-    ents1 = natasha_ner(text)
+    #ents1 = natasha_ner(text)
     ents2 = gazetteer_ner(text)
-    return merge_entities(ents1 + ents2)
+    return merge_entities( ents2)
 
 def inflect_to_case(word: str, canonical: str) -> str:
     """

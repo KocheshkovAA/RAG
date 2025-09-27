@@ -4,51 +4,66 @@ from itertools import combinations
 
 driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 
-def get_node_info(node_title):
+from neo4j import GraphDatabase
+from app.config import NEO4J_USER, NEO4J_PASSWORD, NEO4J_URI
+
+driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+
+def get_node_info(node_title: str, detailed: bool = False):
     with driver.session() as session:
-        result = session.run(
-            """
+        if detailed:
+            query = """
             MATCH (n {title: $title})
             OPTIONAL MATCH (n)-[out_rel]->(out_node)
+              WHERE NOT type(out_rel) IN ['ССЫЛКА', 'ПРИНАДЛЕЖНОСТЬ', 'УЧАСТНИК', 'ПРЕДЫДУЩАЯ', 'СЛЕДУЮЩАЯ']
             OPTIONAL MATCH (in_node)-[in_rel]->(n)
-            RETURN n.title AS title, n.first_paragraph AS text, labels(n) AS labels,
-                   collect(DISTINCT {rel: type(out_rel), target: out_node.title, target_text: out_node.first_paragraph}) AS outgoing,
-                   collect(DISTINCT {rel: type(in_rel), source: in_node.title, source_text: in_node.first_paragraph}) AS incoming
-            """,
-            title=node_title
-        )
+              WHERE NOT type(in_rel) IN ['ССЫЛКА', 'ПРИНАДЛЕЖНОСТЬ', 'УЧАСТНИК', 'ПРЕДЫДУЩАЯ', 'СЛЕДУЮЩАЯ']
+            RETURN n.title AS title,
+                   n.first_paragraph AS text,
+                   labels(n) AS labels,
+                   collect(DISTINCT {rel: type(out_rel), target: out_node.title}) AS outgoing,
+                   collect(DISTINCT {rel: type(in_rel), source: in_node.title}) AS incoming
+            """
+        else:
+            query = """
+            MATCH (n {title: $title})
+            RETURN n.title AS title,
+                   n.first_paragraph AS text,
+                   labels(n) AS labels
+            """
 
-        for record in result:
+        record = session.run(query, title=node_title).single()
+        if not record:
+            return None
+
+        if not detailed:
             output = f"=== {record['title']}"
             if record.get("labels"):
                 output += f" [{', '.join(record['labels'])}]"
             output += " ===\n"
-
             if record["text"]:
                 output += f"Описание: {record['text']}\n"
-
             return output
-            # Остальные исходящие связи
-            others_out = [rel for rel in record["outgoing"] if rel["rel"] not in ("ССЫЛКА", "УЧАСТНИК", "УЧАСТВУЕТ", "КОМАНДОВАНИЕ", "РОДНОЙ_МИР", "ПРЕДСТАВЛЯЕТ", "ПРИНАДЛЕЖНОСТЬ", "РОДНОЙ_МИР", "СИСТЕМА", "СЕГМЕНТУМ", "СУБСЕКТОР", "СЕКТОР")]
-            if others_out:
-                output += "\n"
-                for rel in others_out:
-                    if rel["target"]:
-                        output += f"  - {rel['rel']}: {rel['target']}\n"
-                        if rel["target_text"]:
-                            output += f"      {rel['target_text']}\n"
 
-            # Входящие связи
-            others_in = [rel for rel in record["incoming"] if rel["rel"] not in ("ФРАКЦИЯ", "ССЫЛКА", "УЧАСТНИК", "УЧАСТВУЕТ", "КОМАНДОВАНИЕ", "РОДНОЙ_МИР", "ПРЕДСТАВЛЯЕТ", "ПРИНАДЛЕЖНОСТЬ", "РОДНОЙ_МИР", "СИСТЕМА", "СЕГМЕНТУМ", "СУБСЕКТОР", "СЕКТОР")]
-            if others_in:
-                output += "\n"
-                for rel in others_in:
-                    if rel["source"]:
-                        output += f"  - {rel['rel']}: {rel['source']}\n"
-                        if rel["source_text"]:
-                            output += f"      {rel['source_text']}\n"
+        outgoing = [r for r in record["outgoing"] if r.get("target")]
+        incoming = [r for r in record["incoming"] if r.get("source")]
 
-            return output
+        output = f"=== {record['title']} [{', '.join(record['labels'])}] ===\n"
+        if record["text"]:
+            output += f"Описание: {record['text']}\n\n"
+
+        if outgoing:
+            output += "Исходящие связи:\n"
+            for rel in outgoing:
+                output += f"  - {rel['rel']}: {rel['target']}\n"
+
+        if incoming:
+            output += "\nВходящие связи:\n"
+            for rel in incoming:
+                output += f"  - {rel['rel']}: {rel['source']}\n"
+
+        return output
+
 
 def calculate_graph_metrics(nodes: list, max_length=5):
     """

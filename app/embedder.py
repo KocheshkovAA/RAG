@@ -99,7 +99,8 @@ class HybridRetriever(BaseRetriever):
             base_metadata = first_chunk.metadata.copy()
 
             # добавляем графовую информацию
-            graph_info = get_node_info(title)
+            detailed = len(chunks_scores) > 1 
+            graph_info = get_node_info(title, detailed=detailed)
             merged_text_parts = []
             if graph_info:
                 merged_text_parts.append(f"[Graph Info: {graph_info}]")
