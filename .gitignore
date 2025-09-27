@@ -6,6 +6,14 @@
 /wh_sentence_model_ft
 /wh_sentence_model_ft_gemma
 
+neo4j/data/*
+neo4j/import/*
+neo4j/plugins/*
+
+embedding_model/*
+
+.env
+
 *.db
 *.log
 *.csv

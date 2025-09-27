@@ -4,10 +4,11 @@ import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher
-from aiogram.types import Message
+from aiogram.types import Message, ContentType
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
+from aiogram.filters import Command
 
 from app.formatter import TelegramMarkdownFormatter
 from app.loader import DatabaseTextLoader
@@ -17,15 +18,18 @@ from app.rag import build_rag_chain
 from app.config import CHROMA_PERSIST_DIR
 
 
+# Логирование
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 for name in ["pymorphy2", "sentence_transformers", "app.NER"]:
     logging.getLogger(name).setLevel(logging.INFO)
+
 logger = logging.getLogger(__name__)
 
 
+# Инициализация векторного хранилища
 if CHROMA_PERSIST_DIR.exists() and any(CHROMA_PERSIST_DIR.iterdir()):
     logger.info("Loading existing vectorstore from %s", CHROMA_PERSIST_DIR)
     retriever = build_or_load_vectorstore([])
@@ -36,9 +40,13 @@ else:
     retriever = build_or_load_vectorstore(chunks)
     logger.info("Vectorstore created and persisted at %s", CHROMA_PERSIST_DIR)
 
+
+# Инициализация LLM и RAG цепочки
 llm = get_llm()
 rag_chain = build_rag_chain(llm, retriever)
 
+
+# Инициализация бота
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 bot = Bot(
     token=TELEGRAM_TOKEN,
@@ -46,29 +54,66 @@ bot = Bot(
 )
 dp = Dispatcher(storage=MemoryStorage())
 
+
 @dp.message()
 async def handle_message(message: Message):
     try:
-        logger.info("Received message from user %d: %s", message.from_user.id, message.text)
+        if message.content_type != ContentType.TEXT:
+            # Отвечаем только на текстовые сообщения
+            await message.answer("Я могу отвечать только на текстовые сообщения 📝")
+            return
 
-        result = rag_chain.invoke({"input": message.text})
+        if message.text.startswith("/"):
+            # Команды — стандартный ответ
+            await message.answer("Привет\! Я бот по Warhammer 40k\. Задай мне любой вопрос о вселенной\.")
+
+            return
+
+        logger.info(
+            "Received text message from user %d: %s",
+            message.from_user.id,
+            message.text,
+        )
+
+        # Флаг для остановки индикатора "печатает..."
+        stop_typing = False
+
+        async def send_typing():
+            while not stop_typing:
+                try:
+                    await bot.send_chat_action(message.chat.id, action="typing")
+                except Exception as e:
+                    logger.warning("Failed to send typing action: %s", e)
+                await asyncio.sleep(5)
+
+        typing_task = asyncio.create_task(send_typing())
+
+        # Асинхронно вызываем rag_chain
+        result = await asyncio.to_thread(rag_chain.invoke, {"input": message.text})
         raw_response = result.get("answer", "Failed to get answer")
         source_documents = result.get("context", [])
 
+        stop_typing = True
+        await typing_task
+
+        # Логируем куски текста
         if source_documents:
-            logger.info("Source chunks text:")
             for i, doc in enumerate(source_documents, 1):
-                print(f"\n--- Chunk {i} ---\n{doc.page_content}\n--- End Chunk {i} ---\n")
+                print(
+                    f"\n--- Chunk {i} ---\n{doc.page_content}\n--- End Chunk {i} ---\n"
+                )
 
-
-        # собираем уникальные источники в порядке появления
+        # Собираем уникальные источники
         unique_sources = []
         seen = set()
         for doc in source_documents:
-            title = doc.metadata.get("document_title", doc.metadata.get("title", "Без названия"))
+            title = doc.metadata.get(
+                "document_title", doc.metadata.get("title", "Без названия")
+            )
             source = doc.metadata.get("source")
             if not source:
                 continue
+
             key = (title, source)
             if key not in seen:
                 seen.add(key)
@@ -82,6 +127,7 @@ async def handle_message(message: Message):
                 for i, (title, source) in enumerate(unique_sources, 1)
             )
 
+        # Отправляем ответ частями
         response_chunks = TelegramMarkdownFormatter.format_into_chunks(
             raw_response + sources_text
         )

@@ -67,16 +67,24 @@ class HybridRetriever(BaseRetriever):
             doc_to_chunks[doc_title].append((chunk, score))
 
 
-        # 5) Проверка на графовую связанность
-        # 5) Проверка на графовую связанность
         candidate_nodes = list(doc_to_chunks.keys())
         node_scores, paths_dict, intermediate_nodes = calculate_graph_metrics(candidate_nodes, max_length=5)
 
-        # фильтруем узлы без связей
         filtered_titles = [
-            title for title in candidate_nodes
-            if node_scores.get(title, 0.0) > 0
+            title
+            for title, chunks_scores in doc_to_chunks.items()
+            if node_scores.get(title, 0.0) > 0 or len(chunks_scores) > 1
         ]
+
+        # если их слишком много, можно ограничить топ-k
+        if len(filtered_titles) > self.top_k_final:
+            # например, сортируем по сумме node_score + len(chunks)
+            filtered_titles = sorted(
+                filtered_titles,
+                key=lambda t: node_scores.get(t, 0.0) + len(doc_to_chunks[t]),
+                reverse=True
+            )[:self.top_k_final]
+
 
         # если все нули — берем все узлы
         if not filtered_titles:
