@@ -13,6 +13,8 @@ neo4j/plugins/*
 embedding_model/*
 
 .env
+entities.txt
+test.txt
 
 *.db
 *.log
@@ -21,6 +23,5 @@ embedding_model/*
 *.jsonl
 *.pkl
 *.pt
-*.txt
 *.npz
 *.pth

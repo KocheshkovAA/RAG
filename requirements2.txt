@@ -1,0 +1,5 @@
+natasha==1.6.0
+RapidFuzz==3.13.0
+stop-words==2018.7.23
+langchain_gigachat==0.3.12
+neo4j==5.28.2
