@@ -25,3 +25,7 @@ test.txt
 *.pt
 *.npz
 *.pth
+
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
