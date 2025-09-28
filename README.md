@@ -103,4 +103,5 @@
    LLM получает не только описание отдельных персонажей, но и графовую структуру, показывающую их связь.  
    Например:  
 
-<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/9f2b80a5-b81b-4658-9936-da1f4a6db302" />
+<img width="951" height="654" alt="image" src="https://github.com/user-attachments/assets/f1c9005a-8fb4-40fc-9c88-6f65ed7504b4" />
+
