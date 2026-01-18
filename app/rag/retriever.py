@@ -12,6 +12,7 @@ from app.rag.NER import normalize_text_entities
 from app.config import EMBEDDING_MODEL_NAME, CHROMA_PERSIST_DIR
 from app.rag.query_normalizer import split_and_extract_entities
 from app.graph.node import get_node_info, calculate_graph_metrics
+from langsmith import traceable
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ class HybridRetriever(BaseRetriever):
     top_k_vector: int = Field(default=50)
     top_k_final: int = Field(default=10)
 
+    @traceable
     def _search_by_questions(self, questions: List[Dict[str, str]]) -> List[Tuple[Document, float]]:
         """Поиск релевантных документов по под-вопросам."""
         docs_collected = []
@@ -36,6 +38,7 @@ class HybridRetriever(BaseRetriever):
                 docs_collected.extend(results)
         return docs_collected
 
+    @traceable
     def _search_by_entities(self, entities: List[str]) -> List[Tuple[Document, float]]:
         """Поиск релевантных документов по сущностям."""
         docs_collected = []
@@ -61,6 +64,7 @@ class HybridRetriever(BaseRetriever):
             doc_to_chunks[title].append((chunk, score))
         return doc_to_chunks
 
+    @traceable
     def _add_graph_info(self, filtered_titles: List[str], doc_to_chunks: Dict[str, List[Tuple[Document, float]]]):
         """Добавляет информацию о графе и промежуточные узлы."""
         merged_docs = []
@@ -101,6 +105,7 @@ class HybridRetriever(BaseRetriever):
         merged_docs.sort(key=lambda doc: node_scores.get(doc.metadata.get("title", ""), 0.0), reverse=True)
         return merged_docs, node_scores
 
+    @traceable
     def _filter_top_k(self, doc_to_chunks: Dict[str, List[Tuple[Document, float]]], node_scores: Dict[str, float]) -> List[str]:
         """Фильтруем топ-K документов по графовому весу и количеству чанков."""
         filtered_titles = [
