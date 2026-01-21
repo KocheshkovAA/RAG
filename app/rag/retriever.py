@@ -12,6 +12,8 @@ from app.rag.NER import normalize_text_entities
 from app.config import EMBEDDING_MODEL_NAME, CHROMA_PERSIST_DIR
 from app.rag.query_normalizer import split_and_extract_entities
 from app.graph.node import get_node_info, calculate_graph_metrics
+from app.rag.llm import get_llm
+from app.rag.agent import GraphContextOptimizer
 from langsmith import traceable
 
 logger = logging.getLogger(__name__)
@@ -65,45 +67,74 @@ class HybridRetriever(BaseRetriever):
         return doc_to_chunks
 
     @traceable
-    def _add_graph_info(self, filtered_titles: List[str], doc_to_chunks: Dict[str, List[Tuple[Document, float]]]):
-        """Добавляет информацию о графе и промежуточные узлы."""
-        merged_docs = []
+    def _prepare_agent_payload(self, doc_to_chunks: Dict) -> Dict:
         candidate_nodes = list(doc_to_chunks.keys())
-        node_scores, paths_dict, intermediate_nodes = calculate_graph_metrics(candidate_nodes, max_length=5)
+        node_scores, paths_dict, intermediate_nodes = calculate_graph_metrics(candidate_nodes)
+        
+        all_nodes = []
+        unique_titles = list(doc_to_chunks.keys()) + [n for n in intermediate_nodes if n not in doc_to_chunks]
+        
+        for i, title in enumerate(unique_titles):
+            is_detailed = title in doc_to_chunks
+            node_data = get_node_info(title, detailed=is_detailed)
+            
+            if node_data:
+                all_nodes.append({
+                    "id": f"node_{i+1}", 
+                    "score": round(node_scores.get(title, 0.0), 3) if is_detailed else 0.0,
+                    "graph_info": node_data
+                })
 
-        for title in filtered_titles:
-            chunks_scores = doc_to_chunks[title]
-            first_chunk, _ = chunks_scores[0]
-            base_metadata = first_chunk.metadata.copy()
-            detailed = len(chunks_scores) > 1
-            graph_info = get_node_info(title, detailed=detailed)
-            merged_text_parts = [f"[Graph Info: {graph_info}]" if graph_info else ""]
-            merged_text_parts.extend(chunk.page_content for chunk, _ in chunks_scores)
-            merged_docs.append(Document(page_content="\n".join(merged_text_parts), metadata=base_metadata))
+        return {"nodes": all_nodes, "paths": paths_dict}
+    
+    @traceable
+    def _assemble_final_context(self, clean_payload: Dict, doc_to_chunks: Dict) -> List[Document]:
+        """Собирает текст только если есть валидная ссылка в источнике."""
+        final_docs = []
+        nodes = clean_payload.get("nodes", [])
 
-        # Добавляем промежуточные узлы
-        for interm_node in intermediate_nodes:
-            node_info_text = get_node_info(interm_node) or ""
-            merged_docs.append(Document(
-                page_content=f"[Intermediate Node: {interm_node}]\n{node_info_text}",
-                metadata={"title": interm_node}
+        for n in nodes:
+            info = n.get("graph_info", {})
+            title = info.get("title")
+            if not title: continue
+
+            graph_description = info.get('text', '').strip()
+            chunks_with_scores = doc_to_chunks.get(title, [])
+
+            source_url = None
+            base_metadata = {}
+
+            if chunks_with_scores:
+                first_meta = chunks_with_scores[0][0].metadata
+                source_url = first_meta.get("source") or first_meta.get("url")
+                base_metadata = first_meta.copy()
+            else:
+                source_url = info.get('source') or info.get('url')
+                base_metadata = {"title": title, "source": source_url}
+
+            if not source_url or not str(source_url).startswith("http"):
+                logger.warning(f"Skipping node {title}: no valid HTTP source found.")
+                continue
+
+            if not graph_description and not chunks_with_scores:
+                continue
+
+            content_parts = [f"=== СУЩНОСТЬ: {title} ==="]
+            
+            if graph_description:
+                content_parts.append(f"[ОПИСАНИЕ]: {graph_description}")
+
+            if chunks_with_scores:
+                content_parts.append("[ДОПОЛНИТЕЛЬНЫЕ ДАННЫЕ ИЗ АРХИВОВ]:")
+                for i, (chunk, _) in enumerate(chunks_with_scores, 1):
+                    content_parts.append(f"Фрагмент {i}:\n{chunk.page_content}")
+
+            final_docs.append(Document(
+                page_content="\n\n".join(content_parts),
+                metadata=base_metadata
             ))
 
-        # Добавляем пути между узлами
-        if paths_dict:
-            path_lines = [
-                " ".join(path)
-                for (node1, node2), path in paths_dict.items()
-                if node1 < node2
-            ]
-            merged_docs.append(Document(
-                page_content=f"[Graph Paths]\n" + "\n".join(path_lines),
-                metadata={"title": "Graph Paths", "type": "graph_paths"}
-            ))
-
-        # Сортировка документов по графовому весу
-        merged_docs.sort(key=lambda doc: node_scores.get(doc.metadata.get("title", ""), 0.0), reverse=True)
-        return merged_docs, node_scores
+        return final_docs
 
     @traceable
     def _filter_top_k(self, doc_to_chunks: Dict[str, List[Tuple[Document, float]]], node_scores: Dict[str, float]) -> List[str]:
@@ -121,29 +152,26 @@ class HybridRetriever(BaseRetriever):
         if not filtered_titles:
             filtered_titles = list(doc_to_chunks.keys())
         return filtered_titles
-
+    
     def _get_relevant_documents(self, query: str) -> List[Document]:
-        """Главная функция поиска релевантных документов для запроса."""
         parsed = split_and_extract_entities(query)
-        logger.debug(f"Parsed query: {parsed}")
-        questions = parsed.get("questions", [])
-        questions.append({"text": query})
+        questions = parsed.get("questions", []) + [{"text": query}]
         entities = parsed.get("entities", [])
-
-        if not questions:
-            logger.warning(f"Не удалось извлечь сущности из запроса: {query}")
-            return self.vectorstore.similarity_search(query, k=self.top_k_vector)
 
         docs_by_questions = self._search_by_questions(questions)
         docs_by_entities = self._search_by_entities(entities)
-        all_docs = docs_by_questions + docs_by_entities
+        
+        doc_to_chunks = self._merge_chunks(docs_by_questions + docs_by_entities)
 
-        doc_to_chunks = self._merge_chunks(all_docs)
-        filtered_titles = self._filter_top_k(doc_to_chunks, {title: 0 for title in doc_to_chunks})  # node_scores добавим ниже
+        agent_payload = self._prepare_agent_payload(doc_to_chunks)
 
-        merged_docs, node_scores = self._add_graph_info(filtered_titles, doc_to_chunks)
-        logger.info(f"Total connected documents: {len(merged_docs)} / {len(doc_to_chunks)}")
-        return merged_docs[:self.top_k_final]
+        optimizer = GraphContextOptimizer(model=get_llm())
+        clean_payload = optimizer.optimize(query, agent_payload)
+
+        final_docs = self._assemble_final_context(clean_payload, doc_to_chunks)
+
+        return final_docs
+
 
 
 def build_or_load_vectorstore(documents: List[Document]) -> HybridRetriever:

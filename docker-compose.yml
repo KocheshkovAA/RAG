@@ -3,6 +3,7 @@ version: '3.9'
 services:
   neo4j:
     image: neo4j:2025.07.1-community
+    hostname: neo4j-server
     container_name: neo4j
     ports:
       - "7687:7687"   # Bolt

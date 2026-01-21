@@ -4,25 +4,21 @@ from itertools import combinations
 
 driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 
-from neo4j import GraphDatabase
-from app.config import NEO4J_USER, NEO4J_PASSWORD, NEO4J_URI
-
-driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
-
 def get_node_info(node_title: str, detailed: bool = False):
     with driver.session() as session:
+
         if detailed:
             query = """
             MATCH (n {title: $title})
             OPTIONAL MATCH (n)-[out_rel]->(out_node)
-              WHERE NOT type(out_rel) IN ['ССЫЛКА', 'ПРИНАДЛЕЖНОСТЬ', 'УЧАСТНИК', 'ПРЕДЫДУЩАЯ', 'СЛЕДУЮЩАЯ']
+              WHERE NOT type(out_rel) IN ['ССЫЛКА','ПРИНАДЛЕЖНОСТЬ','УЧАСТНИК','ПРЕДЫДУЩАЯ','СЛЕДУЮЩАЯ']
             OPTIONAL MATCH (in_node)-[in_rel]->(n)
-              WHERE NOT type(in_rel) IN ['ССЫЛКА', 'ПРИНАДЛЕЖНОСТЬ', 'УЧАСТНИК', 'ПРЕДЫДУЩАЯ', 'СЛЕДУЮЩАЯ']
+              WHERE NOT type(in_rel) IN ['ССЫЛКА','ПРИНАДЛЕЖНОСТЬ','УЧАСТНИК','ПРЕДЫДУЩАЯ','СЛЕДУЮЩАЯ']
             RETURN n.title AS title,
                    n.first_paragraph AS text,
                    labels(n) AS labels,
-                   collect(DISTINCT {rel: type(out_rel), target: out_node.title}) AS outgoing,
-                   collect(DISTINCT {rel: type(in_rel), source: in_node.title}) AS incoming
+                   collect(DISTINCT {type: type(out_rel), target: out_node.title}) AS outgoing,
+                   collect(DISTINCT {type: type(in_rel), source: in_node.title}) AS incoming
             """
         else:
             query = """
@@ -33,36 +29,30 @@ def get_node_info(node_title: str, detailed: bool = False):
             """
 
         record = session.run(query, title=node_title).single()
+
         if not record:
             return None
 
+        # базовая структура
+        node_data = {
+            "title": record["title"],
+            "labels": record.get("labels", []),
+            "text": record.get("text", "") or "",
+        }
+
         if not detailed:
-            output = f"=== {record['title']}"
-            if record.get("labels"):
-                output += f" [{', '.join(record['labels'])}]"
-            output += " ===\n"
-            if record["text"]:
-                output += f"Описание: {record['text']}\n"
-            return output
+            return node_data
 
-        outgoing = [r for r in record["outgoing"] if r.get("target")]
-        incoming = [r for r in record["incoming"] if r.get("source")]
+        # чистим связи
+        node_data["outgoing"] = [
+            r for r in record["outgoing"] if r.get("target")
+        ]
 
-        output = f"=== {record['title']} [{', '.join(record['labels'])}] ===\n"
-        if record["text"]:
-            output += f"Описание: {record['text']}\n\n"
+        node_data["incoming"] = [
+            r for r in record["incoming"] if r.get("source")
+        ]
 
-        if outgoing:
-            output += "Исходящие связи:\n"
-            for rel in outgoing:
-                output += f"  - {rel['rel']}: {rel['target']}\n"
-
-        if incoming:
-            output += "\nВходящие связи:\n"
-            for rel in incoming:
-                output += f"  - {rel['rel']}: {rel['source']}\n"
-
-        return output
+        return node_data
 
 
 def calculate_graph_metrics(nodes: list, max_length=5):
