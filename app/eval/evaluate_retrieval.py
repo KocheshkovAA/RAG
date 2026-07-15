@@ -12,7 +12,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
 sys.path.insert(0, project_root)
 
 from app.core.config import settings
-from app.core.base import rag_chain 
+from app.core.vectorrag import rag_chain 
 from app.core.reranker import reranker
 
 K_VALUES = [3, 5, 10, 20]
