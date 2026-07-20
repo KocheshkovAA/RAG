@@ -19,6 +19,38 @@ class RAGRoute(str, Enum):
     GRAPH = "graph"
 
 
+# LightRAG отвечает "не знаю" как полноценный успешный текст, а не как ошибку/
+# пустой результат — эти сигнатуры ловим и прогоняем через insufficient_response().
+# Помимо короткой канонической фразы LightRAG иногда генерирует целое markdown-
+# эссе на русском о том, что в контексте нет информации — ловим это по совпадению
+# корня "контекст" с одним из "нет информации"-маркеров, а не точной фразой.
+_LIGHTRAG_EMPTY_MARKERS_EN = (
+    "no relevant context found",
+    "no context",
+    "not able to provide an answer",
+    "unable to provide an answer",
+)
+
+_LIGHTRAG_NO_INFO_STEMS = (
+    "отсутств",  # отсутствует / отсутствие
+    "не представлен",  # не представлена / не представлено / не представлены
+    "нет информац",  # нет информации
+    "не найдено",
+    "недостаточно",
+)
+
+
+def _is_lightrag_empty_answer(answer) -> bool:
+    if not answer or not isinstance(answer, str):
+        return True
+    lowered = answer.lower()
+    if any(marker in lowered for marker in _LIGHTRAG_EMPTY_MARKERS_EN):
+        return True
+    return "контекст" in lowered and any(
+        stem in lowered for stem in _LIGHTRAG_NO_INFO_STEMS
+    )
+
+
 class RouteDecision(BaseModel):
     """Схема для классификации входящего вопроса пользователя по вселенной Warhammer 40k."""
 
@@ -117,6 +149,17 @@ class WarhammerOrchestrator:
                     vector_result["mode"] = "vector-fallback"
                     score_ask_result(question, vector_result)
                     return vector_result
+
+                if _is_lightrag_empty_answer(result.get("answer")):
+                    degraded = list(result.get("degraded") or [])
+                    for dep in probe.get("degraded") or []:
+                        if dep not in degraded:
+                            degraded.append(dep)
+                    refused = self._refuse(
+                        probe["retrieval_gate"], degraded, started, mode="graph-empty"
+                    )
+                    score_ask_result(question, refused)
+                    return refused
 
                 result.setdefault(
                     "guardrail",
