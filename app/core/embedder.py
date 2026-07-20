@@ -1,7 +1,7 @@
 # app/embeddings.py
 from typing import List
 from langchain_core.embeddings import Embeddings
-from tenacity.retry import retry_if_exception_type, retry_if_result
+from tenacity.retry import retry_if_exception_type
 from fastembed import SparseTextEmbedding
 from qdrant_client.models import SparseVector
 import httpx
@@ -19,7 +19,10 @@ class TEIEmbeddings(Embeddings):
             "Instruct: Given a web search query, retrieve relevant passages "
             "that answer the query\nQuery: "
         )
-        self.client = httpx.AsyncClient(timeout=120.0, limits=httpx.Limits(max_connections=100))
+        self.client = httpx.AsyncClient(
+            timeout=settings.TEI_TIMEOUT_SEC,
+            limits=httpx.Limits(max_connections=100),
+        )
 
     @observe(name="TEI embed_documents", capture_output=False)
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
@@ -31,26 +34,40 @@ class TEIEmbeddings(Embeddings):
 
     def _sync_embed(self, texts: List[str], is_query: bool) -> List[List[float]]:
         processed = texts if not is_query else [f"{self.query_prefix}{t}" for t in texts]
-        resp = httpx.post(f"{self.url}", json={"inputs": processed}, timeout=120.0)
+        resp = httpx.post(
+            f"{self.url}",
+            json={"inputs": processed},
+            timeout=settings.TEI_TIMEOUT_SEC,
+        )
         resp.raise_for_status()
         return resp.json()
 
     @observe(name="TEI aembed_documents", capture_output=False)
     @retry(
-        stop=stop_after_attempt(6),
-        wait=wait_exponential(multiplier=1, min=2, max=30),
-        retry=retry_if_exception_type(httpx.HTTPStatusError),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=8),
+        retry=retry_if_exception_type(
+            (httpx.HTTPStatusError, httpx.ReadTimeout, httpx.ConnectError)
+        ),
         reraise=True,
     )
     async def aembed_documents(self, texts: List[str]) -> List[List[float]]:
+        from app.core.health import tei_breaker
+
+        if not tei_breaker.allow():
+            raise RuntimeError("TEI circuit is open")
+
         lf = get_client()
         lf.update_current_trace(input={"count": len(texts), "type": "documents"})
 
-        processed = texts 
-        resp = await self.client.post(f"{self.url}", json={"inputs": processed})
-
-        resp.raise_for_status()
-        return resp.json()
+        try:
+            resp = await self.client.post(f"{self.url}", json={"inputs": texts})
+            resp.raise_for_status()
+            tei_breaker.record_success()
+            return resp.json()
+        except Exception:
+            tei_breaker.record_failure()
+            raise
 
     async def aembed_query(self, text: str) -> List[float]:
         return (await self.aembed_documents([f"{self.query_prefix}{text}"]))[0]

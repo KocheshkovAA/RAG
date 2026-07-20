@@ -27,3 +27,10 @@ httpx
 redis
 langfuse
 tenacity
+
+# UI
+chainlit
+
+# Tests
+pytest
+pytest-asyncio

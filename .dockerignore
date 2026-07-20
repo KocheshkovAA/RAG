@@ -1,0 +1,53 @@
+# Не тащить гигабайты в Docker build context
+.git
+.gitignore
+**/.git
+
+# Обучение / веса / чекпоинты
+training
+**/unsloth*
+**/*.pt
+**/*.bin
+**/*.safetensors
+**/*.gguf
+**/*.onnx
+
+# Данные и локальные стораджи
+data
+**/qdrant_data
+**/tei_data
+**/lightrag
+**/minio_data
+**/vllm_cache
+**/langfuse*
+
+# Артефакты и кэши
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.venv
+venv
+env
+node_modules
+.ipynb_checkpoints
+**/.ipynb_checkpoints
+experiments
+**/*.ipynb
+
+# IDE / OS
+.idea
+.vscode
+.cursor
+*.swp
+.DS_Store
+
+# Логи и eval dumps (не нужны в runtime image — монтируются volume)
+app/eval/results
+*.log
+
+# Docs / misc
+*.md
+!requirements.txt
+agent-transcripts

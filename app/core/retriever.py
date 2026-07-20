@@ -62,7 +62,7 @@ class Retriever(BaseRetriever):
 
         client = qdrant_client or QdrantClient(
             url=settings.QDRANT_URL,
-            timeout=60.0,
+            timeout=settings.QDRANT_TIMEOUT_SEC,
         )
 
         self.vector_store = QdrantVectorStore(
@@ -106,8 +106,10 @@ class Retriever(BaseRetriever):
         config: Optional[RunnableConfig] = None,
         **kwargs: Any
     ) -> List[Document]:
-        # Для асинхронного вызова просто запускаем синхронную логику (т.к. клиент синхронный)
-        return self._get_relevant_documents(query, config=config, **kwargs)
+        # Sync Qdrant/TEI клиент — в threadpool, чтобы не блокировать event loop
+        return await asyncio.to_thread(
+            self._get_relevant_documents, query, config=config, **kwargs
+        )
 
     def _retrieve_hybrid(self, query: str, **kwargs) -> List[Document]:
         qdrant_filter = kwargs.get("filter")

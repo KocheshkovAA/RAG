@@ -214,6 +214,17 @@ services:
         - LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT=http://minio:9000
         - LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE=true
         - AWS_REGION=${LANGFUSE_S3_EVENT_UPLOAD_REGION:-us-east-1}
+        # Локальный вход без SSO
+        - AUTH_DISABLE_USERNAME_PASSWORD=${AUTH_DISABLE_USERNAME_PASSWORD:-false}
+        - LANGFUSE_INIT_ORG_ID=${LANGFUSE_INIT_ORG_ID:-warhammer}
+        - LANGFUSE_INIT_ORG_NAME=${LANGFUSE_INIT_ORG_NAME:-Warhammer Wiki Bot}
+        - LANGFUSE_INIT_PROJECT_ID=${LANGFUSE_INIT_PROJECT_ID:-warhammer-rag}
+        - LANGFUSE_INIT_PROJECT_NAME=${LANGFUSE_INIT_PROJECT_NAME:-RAG}
+        - LANGFUSE_INIT_PROJECT_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY}
+        - LANGFUSE_INIT_PROJECT_SECRET_KEY=${LANGFUSE_SECRET_KEY}
+        - LANGFUSE_INIT_USER_EMAIL=${LANGFUSE_INIT_USER_EMAIL:-admin@example.com}
+        - LANGFUSE_INIT_USER_NAME=${LANGFUSE_INIT_USER_NAME:-admin}
+        - LANGFUSE_INIT_USER_PASSWORD=${LANGFUSE_INIT_USER_PASSWORD:-adminadmin}
 
   langfuse-worker:
     image: langfuse/langfuse-worker:3
@@ -256,6 +267,27 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      vllm-reranker:
+        condition: service_started
+
+  # Chat UI (Chainlit) → FastAPI /v1/ask
+  chainlit:
+    build: .
+    command: >
+      chainlit run app/ui/chainlit_app.py
+      --host 0.0.0.0
+      --port 8501
+      -h
+    ports:
+      - "${CHAINLIT_PORT:-8501}:8501"
+    volumes:
+      - .:/app
+    env_file: .env
+    environment:
+      - RAG_API_URL=http://api:8000
+      - CHAINLIT_ASK_TIMEOUT=90
+    depends_on:
+      - api
 
 volumes:
   langfuse_db_data:

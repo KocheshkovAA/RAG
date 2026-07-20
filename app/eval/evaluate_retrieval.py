@@ -45,7 +45,9 @@ async def evaluate_one(question_data, use_rerank: bool, collect_answers: bool = 
     try:
         handler = CallbackHandler()
         # 1. Получаем документы через твой RAG класс
-        final_docs = await rag_chain.get_relevant_documents(question, handler=handler)
+        final_docs, _degraded = await rag_chain.get_relevant_documents(
+            question, handler=handler
+        )
 
         if not final_docs:
             return {"error": "No documents retrieved"}

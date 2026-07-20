@@ -1,0 +1,10 @@
+[project]
+enable_telemetry = false
+
+[UI]
+name = "Warhammer 40k RAG"
+default_collapse_content = true
+default_theme = "dark"
+
+[meta]
+generated_by = "2.0.0"

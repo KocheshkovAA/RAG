@@ -1,30 +1,30 @@
-# app/core/lightrag_client.py
 import httpx
-from app.core.config import settings
 import logging
 from langfuse import observe
 
+from app.core.config import settings
+from app.core.health import lightrag_breaker
+from app.core.resilience import call_with_circuit
+
 logger = logging.getLogger(__name__)
+
 
 class LightRAGClient:
     def __init__(self):
-        self.base_url = settings.LIGHTRAG_BASE_URL  # добавь в settings: "http://lightrag:9621"
-        self.timeout = httpx.Timeout(90.0, connect=10.0)
+        self.base_url = settings.LIGHTRAG_BASE_URL
+        self.timeout = httpx.Timeout(settings.LIGHTRAG_TIMEOUT_SEC, connect=5.0)
 
     @observe(name="LightRAG Query")
     async def query(self, question: str, mode: str = "mix") -> dict:
-        """
-        mode может быть: naive / local / global / hybrid / mix
-        """
         payload = {
             "query": question,
             "mode": mode,
-            "enable_rerank": True,      # используем твой vLLM reranker
+            "enable_rerank": True,
             "top_k": 40,
         }
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            try:
+        async def _call() -> dict:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
                 resp = await client.post(
                     f"{self.base_url}/query",
                     json=payload,
@@ -32,12 +32,36 @@ class LightRAGClient:
                 )
                 resp.raise_for_status()
                 data = resp.json()
-                
                 return {
                     "answer": data.get("answer", data.get("response", "Нет ответа")),
                     "sources": data.get("sources", []) or data.get("context", []),
                     "mode": f"lightrag-{mode}",
+                    "degraded": [],
+                    "cached": False,
                 }
-            except Exception as e:
-                logger.error(f"LightRAG error: {e}")
-                return {"answer": "LightRAG временно недоступен", "sources": [], "mode": "lightrag-error"}
+
+        def _unavailable() -> dict:
+            return {
+                "answer": None,
+                "sources": [],
+                "mode": "lightrag-unavailable",
+                "degraded": ["lightrag"],
+                "cached": False,
+                "_fallback_to_vector": True,
+            }
+
+        try:
+            result, degraded = await call_with_circuit(
+                lightrag_breaker,
+                _call,
+                fallback=_unavailable,
+            )
+            if degraded and result.get("_fallback_to_vector"):
+                return result
+            if degraded:
+                result = dict(result)
+                result.setdefault("degraded", []).append("lightrag")
+            return result
+        except Exception as e:
+            logger.error("LightRAG error: %s", e)
+            return _unavailable()

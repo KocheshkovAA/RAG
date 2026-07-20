@@ -18,3 +18,9 @@ data/eval/*
 
 app/eval/results/*
 experiments/judge_results.csv
+
+# Unsloth / LoRA training artifacts
+training/
+
+# Chainlit runtime file cache (per-session generated elements)
+.files/
