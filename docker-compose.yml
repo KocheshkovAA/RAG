@@ -1,6 +1,8 @@
 services:
   lightrag:
-    image: ghcr.io/hkuds/lightrag:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.lightrag
     ports:
       - "${LIGHTRAG_PORT:-9621}:9621"
     volumes:
@@ -16,7 +18,7 @@ services:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9621/health"]
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:9621/health').status == 200 else 1)"]
       interval: 15s
       timeout: 10s
       retries: 5
@@ -73,7 +75,10 @@ services:
   #     retries: 10
 
   vllm-reranker:
-      image: vllm/vllm-openai:latest
+      # Пин на последний релиз с CUDA 12.9 (v0.20.0+ перешёл на CUDA 13.0.2,
+      # несовместимую с драйвером хоста 535.309.01 / CUDA 12.2 — см. RuntimeError
+      # "The NVIDIA driver on your system is too old" при :latest)
+      image: vllm/vllm-openai:v0.19.1
       container_name: vllm-reranker
       environment:
         - CUDA_VISIBLE_DEVICES=0
@@ -192,6 +197,8 @@ services:
         - "${LANGFUSE_PORT}:3000"
       environment:
         - NODE_ENV=production
+        # Single-node ClickHouse (нет Zookeeper/кластера) — без этого миграции падают на ON CLUSTER
+        - CLICKHOUSE_CLUSTER_ENABLED=false
         - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@langfuse-db:5432/${POSTGRES_DB}
         - CLICKHOUSE_URL=http://clickhouse:8123/${CH_DB}
         # Исправлено: используем переменные для миграций
@@ -234,6 +241,7 @@ services:
       redis: { condition: service_healthy }
     environment:
       - NODE_ENV=production
+      - CLICKHOUSE_CLUSTER_ENABLED=false
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@langfuse-db:5432/${POSTGRES_DB}
       - CLICKHOUSE_URL=http://clickhouse:8123/${CH_DB}
       - CLICKHOUSE_USER=${CH_USER}

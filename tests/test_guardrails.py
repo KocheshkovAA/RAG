@@ -41,6 +41,39 @@ def test_gate_empty_retrieval():
     assert meta["reason"] == "empty_retrieval"
 
 
+def test_gate_uses_looser_threshold_without_rerank():
+    """Без reranker'а в metadata только hybrid_score (ранговый RRF-скор,
+    не семантический) — тот же порог 0.55, что и для rerank_score, отсекал
+    бы даже нормальные по теме вопросы (см. регресс, найденный при живом
+    прогоне: 'Кто такие Адептус Астартес?' и оффтоп давали одинаковый
+    max_score=0.5). Порог для hybrid-only должен быть отдельным и мягче."""
+    gate = RetrievalGate(min_score=0.55, min_score_no_rerank=0.2)
+    docs = [_doc(0.5, rerank=False)]
+    kept, meta = gate.filter_docs(docs)
+    assert meta["passed"] is True
+    assert meta["scoring"] == "hybrid_only"
+    assert meta["min_score"] == 0.2
+    assert kept == docs
+
+
+def test_gate_still_rejects_near_empty_hybrid_signal():
+    gate = RetrievalGate(min_score=0.55, min_score_no_rerank=0.2)
+    docs = [_doc(0.05, rerank=False)]
+    kept, meta = gate.filter_docs(docs)
+    assert kept == []
+    assert meta["passed"] is False
+    assert meta["scoring"] == "hybrid_only"
+
+
+def test_gate_mixed_docs_use_rerank_threshold_when_any_reranked():
+    """Если хотя бы часть документов прошла реранк — считаем скор reranked-шкалой."""
+    gate = RetrievalGate(min_score=0.55, min_score_no_rerank=0.2)
+    docs = [_doc(0.6, rerank=True), _doc(0.5, rerank=False)]
+    kept, meta = gate.filter_docs(docs)
+    assert meta["scoring"] == "rerank"
+    assert meta["min_score"] == 0.55
+
+
 def test_faithfulness_skipped_on_high_confidence():
     guard = AnswerFaithfulnessGuard(enabled=True)
     docs = [_doc(0.85)]

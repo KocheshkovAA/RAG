@@ -122,7 +122,11 @@ class WarhammerOrchestrator:
                     "guardrail",
                     {"refused": False, "retrieval_gate": probe["retrieval_gate"]},
                 )
-                result.setdefault("degraded", [])
+                degraded = list(result.get("degraded") or [])
+                for dep in probe.get("degraded") or []:
+                    if dep not in degraded:
+                        degraded.append(dep)
+                result["degraded"] = degraded
                 result.setdefault("cached", False)
                 result["mode"] = result.get("mode", "lightrag-hybrid")
                 result["latency_ms"] = int((time.perf_counter() - started) * 1000)

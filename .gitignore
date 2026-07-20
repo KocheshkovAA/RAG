@@ -27,3 +27,6 @@ training/
 
 # Personal Claude Code settings
 /.claude/settings.local.json
+
+# Personal working notes
+/TODO.md

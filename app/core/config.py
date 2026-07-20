@@ -20,7 +20,17 @@ class Settings(BaseSettings):
 
     # --- GUARDRAILS ---
     # 0.55 отсекает «случайный» top-k (~0.50 на оффтопе вроде Губки Боба)
+    # Калибровано под rerank_score (сигмоида reranker'а)
     RETRIEVAL_MIN_SCORE: float = Field(default=0.55)
+    # Без reranker'а (circuit open / RERANKER_ENABLED=False) в metadata остаётся
+    # только hybrid_score — это RRF-скор по рангу (0.5/0.333/0.25...), а не
+    # семантическая близость: top-1 хит скорим ~0.5 независимо от того,
+    # релевантен он вопросу или нет. Поэтому тот же порог 0.55 в деградации
+    # отсекает вообще всё, включая нормальные вопросы по теме. Порог ниже —
+    # это просто пол «хоть что-то нашлось», а не confidence gate; реальная
+    # защита от оффтопа в этом режиме — обязательная faithfulness-проверка
+    # (AnswerFaithfulnessGuard.should_verify всегда True при degraded=True).
+    RETRIEVAL_MIN_SCORE_NO_RERANK: float = Field(default=0.2)
     FAITHFULNESS_CHECK_ENABLED: bool = Field(default=True)
     FAITHFULNESS_MIN_SCORE: float = Field(default=0.7)
     # Серая зона 0.55–0.80: генерация + LLM-верификация; выше 0.80 — можно пропустить verify

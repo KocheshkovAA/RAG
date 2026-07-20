@@ -1,0 +1,6 @@
+FROM ghcr.io/hkuds/lightrag:latest
+
+# Официальный образ не включает опциональный extra "observability" —
+# без него LANGFUSE_* переменные в .env ничего не делают.
+# https://github.com/HKUDS/LightRAG/issues/2581
+RUN python3 -m pip install --no-cache-dir "langfuse>=3.8.1"

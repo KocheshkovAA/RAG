@@ -43,12 +43,18 @@ class RetrievalGate:
     def __init__(
         self,
         min_score: Optional[float] = None,
+        min_score_no_rerank: Optional[float] = None,
         insufficient_message: Optional[str] = None,
     ):
         configured = (
             min_score if min_score is not None else settings.RETRIEVAL_MIN_SCORE
         )
         self.min_score = max(configured, settings.RERANK_MIN_SCORE)
+        self.min_score_no_rerank = (
+            min_score_no_rerank
+            if min_score_no_rerank is not None
+            else settings.RETRIEVAL_MIN_SCORE_NO_RERANK
+        )
         self.insufficient_message = (
             insufficient_message or settings.INSUFFICIENT_INFO_MESSAGE
         )
@@ -63,9 +69,17 @@ class RetrievalGate:
                 "min_score": self.min_score,
             }
 
+        # Без rerank_score в metadata остаётся только hybrid (RRF) скор — он
+        # ранговый, не семантический, и несравним по шкале с rerank_score.
+        # Порог 0.55 калиброван под reranker; на hybrid-only берём отдельный,
+        # более мягкий порог (см. комментарий у RETRIEVAL_MIN_SCORE_NO_RERANK).
+        has_rerank = any("rerank_score" in (d.metadata or {}) for d in docs)
+        active_min_score = self.min_score if has_rerank else self.min_score_no_rerank
+        scoring = "rerank" if has_rerank else "hybrid_only"
+
         scored = [(doc_relevance_score(d), d) for d in docs]
         max_score = max(s for s, _ in scored)
-        kept = [d for s, d in scored if s >= self.min_score]
+        kept = [d for s, d in scored if s >= active_min_score]
 
         if not kept:
             return [], {
@@ -74,7 +88,8 @@ class RetrievalGate:
                 "max_score": round(max_score, 4),
                 "kept": 0,
                 "dropped": len(docs),
-                "min_score": self.min_score,
+                "min_score": active_min_score,
+                "scoring": scoring,
             }
 
         return kept, {
@@ -83,7 +98,8 @@ class RetrievalGate:
             "max_score": round(max_score, 4),
             "kept": len(kept),
             "dropped": len(docs) - len(kept),
-            "min_score": self.min_score,
+            "min_score": active_min_score,
+            "scoring": scoring,
         }
 
     def insufficient_response(self, gate_meta: dict[str, Any]) -> dict[str, Any]:
