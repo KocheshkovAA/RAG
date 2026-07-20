@@ -24,3 +24,6 @@ training/
 
 # Chainlit runtime file cache (per-session generated elements)
 .files/
+
+# Personal Claude Code settings
+/.claude/settings.local.json

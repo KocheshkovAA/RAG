@@ -25,7 +25,7 @@ services:
     image: antonk0/gigachat-adapter:latest
     environment:
       GIGACHAT_CREDENTIALS: ${GIGACHAT_CREDENTIALS}
-      BEARER_TOKEN: MDNmNmY3ZDQtOWY4Mi00OGZmLTgzMWQtMWQ3NDJlYzhhMGEzOmMxMmIyY2M0LTFlM2MtNGFlNy1iNzg0LWM0YWZlNWRlZmYyYQ==
+      BEARER_TOKEN: ${GIGACHAT_ADAPTER_BEARER_TOKEN}
       GIGACHAT_VERIFY_SSL_CERTS: "False"
       timeout: 360
     ports:

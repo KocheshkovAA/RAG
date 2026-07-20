@@ -19,8 +19,7 @@ ragas
 qdrant-client
 fastembed
 
-# Bot & API Client
-aiogram
+# API Client
 httpx
 
 # Infrastructure
