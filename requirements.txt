@@ -30,6 +30,9 @@ tenacity
 # UI
 chainlit
 
+# MCP server
+mcp
+
 # Tests
 pytest
 pytest-asyncio

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "warhammer-lore": {
+      "type": "http",
+      "url": "http://localhost:8010/mcp"
+    }
+  }
+}

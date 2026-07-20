@@ -11,7 +11,7 @@ A hybrid RAG system answering Warhammer 40k lore questions in Russian, backed by
 Everything runs through Docker Compose; the `api` container is where app code executes.
 
 ```bash
-make up          # start core stack (api, qdrant, tei, vllm-reranker, redis, lightrag, gigachat-adapter)
+make up          # start core stack (api, qdrant, tei, vllm-reranker, redis, lightrag, gigachat-adapter, mcp-server)
 make debug-up    # core stack + Langfuse/Clickhouse/Minio (tracing profile)
 make down        # stop and remove all containers + volumes
 make ui          # build/start the Chainlit chat UI (http://localhost:8501)

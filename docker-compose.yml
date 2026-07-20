@@ -278,6 +278,20 @@ services:
       vllm-reranker:
         condition: service_started
 
+  # MCP-сервер (streamable-HTTP) → FastAPI /v1/ask, для Claude Desktop/Code
+  mcp-server:
+    build: .
+    command: ["python3", "mcp_server/server.py"]
+    ports:
+      - "${MCP_PORT:-8010}:8010"
+    volumes:
+      - .:/app
+    env_file: .env
+    environment:
+      - WARHAMMER_API_URL=http://api:8000
+    depends_on:
+      - api
+
   # Chat UI (Chainlit) → FastAPI /v1/ask
   chainlit:
     build: .
