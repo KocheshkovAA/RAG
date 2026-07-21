@@ -11,6 +11,7 @@ langchain-core
 langchain-qdrant       # Специализированный пакет для Qdrant
 langchain-openai       # Или langchain-gigachat, если используешь его
 langchain_gigachat
+langgraph              # Граф для MVP дебатов персонажей (app/core/persona_debate.py)
 
 # Eval
 ragas

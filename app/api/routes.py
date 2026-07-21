@@ -1,9 +1,12 @@
+import json
 import logging
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.core.vectorrag import rag_chain
 from app.core.agentic_rag import AgenticRAG
+from app.core.persona_debate import PersonaDebate
 from app.core.lightrag_client import LightRAGClient
 from app.core.orchestrator import WarhammerOrchestrator
 from app.core.config import settings
@@ -18,6 +21,7 @@ router = APIRouter()
 light_rag = LightRAGClient()
 agentic_rag = AgenticRAG(rag_chain)
 orchestrator = WarhammerOrchestrator(vector_rag=rag_chain, light_rag=light_rag, agentic_rag=agentic_rag)
+persona_debate = PersonaDebate(rag_chain)
 
 
 class QuestionRequest(BaseModel):
@@ -76,6 +80,36 @@ async def ask(request: QuestionRequest):
                 "cause": str(e)[:200],
             },
         )
+
+
+class DebateRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=2000)
+    session_id: str | None = Field(default=None, max_length=128)
+    user_id: str | None = Field(default=None, max_length=128)
+
+
+@router.post("/debate")
+async def debate(request: DebateRequest):
+    """Стримящий NDJSON-эндпоинт (не обычный JSON, как /ask) — каждая строка
+    ответа это отдельное событие {"type": "turn"|"refused"|"done", ...},
+    персонажи отправляются по мере готовности, а не все разом в конце."""
+    if not settings.PERSONA_DEBATE_ENABLED:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "feature_disabled", "message": "Debate feature is disabled."},
+        )
+
+    async def event_stream():
+        try:
+            async for event in persona_debate.stream(request.question):
+                yield json.dumps(event, ensure_ascii=False) + "\n"
+        except Exception as e:
+            logger.exception("Debate failed")
+            yield json.dumps({"type": "error", "message": str(e)[:200]}, ensure_ascii=False) + "\n"
+        finally:
+            flush()
+
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
 
 
 @router.get("/ready")

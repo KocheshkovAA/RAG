@@ -9,6 +9,7 @@ Chainlit UI для Warhammer RAG.
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
@@ -17,16 +18,20 @@ import chainlit as cl
 
 API_URL = os.getenv("RAG_API_URL", "http://api:8000").rstrip("/")
 ASK_TIMEOUT = float(os.getenv("CHAINLIT_ASK_TIMEOUT", "90"))
+DEBATE_PREFIX = "/debate"
 
 
 WELCOME = """**Warhammer 40k Lore RAG**
 
-Спроси про фракции, персонажей, кампании.  
+Спроси про фракции, персонажей, кампании.
 Оффтоп и слабый retrieval система отклонит (guardrails).
 
 Примеры:
 - Как Чернокаменные крепости связаны с Абаддоном?
 - Кто такие Адептус Астартес?
+
+Команда `/debate <вопрос>` — несколько персонажей (Орк-Варбосс, Эльдарский
+Провидец, Космодесантник) обсуждают вопрос каждый в своей манере.
 """
 
 
@@ -80,6 +85,67 @@ def _source_elements(sources: list) -> list[cl.Text]:
     return elements
 
 
+def _format_debate_meta(data: dict[str, Any]) -> str:
+    """Meta для дебата — не переиспользует _format_meta: у дебата нет единого
+    top-level mode/faithfulness, зато есть any_refused."""
+    parts = [f"**token_usage:** `{(data.get('token_usage') or {}).get('total')}`"]
+    degraded = data.get("degraded") or []
+    if degraded:
+        parts.append(f"**degraded:** `{', '.join(degraded)}`")
+    return " · ".join(parts)
+
+
+async def _handle_debate(question: str, session_id: Any) -> None:
+    status = cl.Message(content="Персонажи готовятся к дебатам…")
+    await status.send()
+    status_removed = False
+
+    try:
+        async with httpx.AsyncClient(timeout=100.0) as client:
+            async with client.stream(
+                "POST",
+                f"{API_URL}/v1/debate",
+                json={"question": question, "session_id": str(session_id), "user_id": "chainlit"},
+            ) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line.strip():
+                        continue
+                    event = json.loads(line)
+
+                    if not status_removed:
+                        await status.remove()
+                        status_removed = True
+
+                    event_type = event.get("type")
+                    if event_type == "turn":
+                        turn = event["turn"]
+                        content = turn["answer"]
+                        if turn.get("refused"):
+                            content = f"_[отказ проверки достоверности]_ {content}"
+                        await cl.Message(author=turn["persona_display_name"], content=content).send()
+                    elif event_type == "refused":
+                        await cl.Message(content=event.get("answer") or "Пустой ответ.").send()
+                    elif event_type == "error":
+                        await cl.Message(content=f"Ошибка дебата: `{event.get('message')}`").send()
+                    elif event_type == "done":
+                        sources = event.get("sources") or []
+                        elements = _source_elements(sources)
+                        if elements:
+                            await cl.Message(content="Источники дебата:", elements=elements).send()
+                        async with cl.Step(name="meta", type="tool") as step:
+                            step.output = _format_debate_meta(event)
+    except httpx.HTTPStatusError as e:
+        if not status_removed:
+            await status.remove()
+        detail = e.response.text[:500]
+        await cl.Message(content=f"API ошибка `{e.response.status_code}`:\n```\n{detail}\n```").send()
+    except Exception as e:
+        if not status_removed:
+            await status.remove()
+        await cl.Message(content=f"Не удалось достучаться до API (`{API_URL}`): `{e}`").send()
+
+
 @cl.on_chat_start
 async def on_chat_start() -> None:
     cl.user_session.set("session_id", cl.context.session.id)
@@ -94,6 +160,15 @@ async def on_message(message: cl.Message) -> None:
         return
 
     session_id = cl.user_session.get("session_id") or cl.context.session.id
+
+    if question.lower().startswith(DEBATE_PREFIX):
+        debate_question = question[len(DEBATE_PREFIX):].strip()
+        if not debate_question:
+            await cl.Message(content="Использование: `/debate <вопрос>`").send()
+            return
+        await _handle_debate(debate_question, session_id)
+        return
+
     status = cl.Message(content="Ищу в базе лора…")
     await status.send()
 

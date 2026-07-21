@@ -98,6 +98,15 @@ class Settings(BaseSettings):
     # (не отдельный порог, чтобы не разъезжались калибровки).
     AGENTIC_MAX_ITERATIONS: int = Field(default=3)
 
+    PERSONA_LLM_PROVIDER: str = Field(default="")
+    PERSONA_LLM_MODEL: str = Field(default="")
+
+    # --- PERSONA DEBATE (MVP) ---
+    # Отдельный explicit-эндпоинт (/v1/debate), роутер его не выбирает и не
+    # знает о нём вообще — это operational kill-switch для дорогой фичи
+    # (до 2×N последовательных LLM-вызовов на раунд), а не gate для авто-роутинга.
+    PERSONA_DEBATE_ENABLED: bool = Field(default=True)
+
     model_config = SettingsConfigDict(
         env_file=".env", 
         env_file_encoding="utf-8", 
