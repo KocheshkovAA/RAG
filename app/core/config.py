@@ -87,6 +87,17 @@ class Settings(BaseSettings):
     FAITHFULNESS_LLM_PROVIDER: str = Field(default="")
     FAITHFULNESS_LLM_MODEL: str = Field(default="")
 
+    AGENTIC_LLM_PROVIDER: str = Field(default="")
+    AGENTIC_LLM_MODEL: str = Field(default="")
+
+    # --- AGENTIC ROUTE ---
+    # По умолчанию выключено: роутер сам не выбирает agentic, пока не включим явно.
+    AGENTIC_ROUTE_ENABLED: bool = Field(default=False)
+    # Сколько раз можно переформулировать запрос и повторить ретрив, прежде чем
+    # сдаться. Условие остановки — тот же RetrievalGate, что у vector-маршрута
+    # (не отдельный порог, чтобы не разъезжались калибровки).
+    AGENTIC_MAX_ITERATIONS: int = Field(default=3)
+
     model_config = SettingsConfigDict(
         env_file=".env", 
         env_file_encoding="utf-8", 

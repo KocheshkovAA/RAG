@@ -7,9 +7,12 @@ from langfuse import observe, propagate_attributes
 
 from app.core.llm import llm_factory
 from app.core.vectorrag import RAG
+from app.core.agentic_rag import AgenticRAG
 from app.core.lightrag_client import LightRAGClient
 from app.core.guardrails import RetrievalGate
 from app.core.tracing import score_ask_result
+from app.core.config import settings
+from app.core.usage import new_usage_handler, summarize_usage
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +20,7 @@ logger = logging.getLogger(__name__)
 class RAGRoute(str, Enum):
     VECTOR = "vector"
     GRAPH = "graph"
+    AGENTIC = "agentic"
 
 
 # LightRAG отвечает "не знаю" как полноценный успешный текст, а не как ошибку/
@@ -65,11 +69,23 @@ class RouteDecision(BaseModel):
 
 
 class WarhammerOrchestrator:
-    def __init__(self, vector_rag: RAG, light_rag: LightRAGClient):
+    def __init__(self, vector_rag: RAG, light_rag: LightRAGClient, agentic_rag: AgenticRAG):
         self.vector_rag = vector_rag
         self.light_rag = light_rag
+        self.agentic_rag = agentic_rag
         self.llm = llm_factory.get_llm(temperature=0, role="router")
         self.retrieval_gate = RetrievalGate()
+
+        agentic_instruction = ""
+        if settings.AGENTIC_ROUTE_ENABLED:
+            agentic_instruction = (
+                "\nЕсть также 'agentic' (агентный поиск с самостоятельной переформулировкой "
+                "запроса при неудаче) — выбирай его для составных фактических вопросов, где "
+                "обычный единичный поиск может не найти всё сразу (несколько разных сущностей/"
+                "дат/названий в одном вопросе), но это НЕ вопрос про Ересь Хоруса с анализом "
+                "причин и связей (тот остаётся 'graph'). При сомнении между 'agentic' и "
+                "'vector' — выбирай 'vector'.\n"
+            )
 
         self.system_prompt = (
             "Ты — логический модуль системы Warhammer 40k Lore Knowledge Base. "
@@ -81,7 +97,8 @@ class WarhammerOrchestrator:
             "последствия).\n"
             "- Вопрос сложный: нужно понять связи между несколькими сущностями или причинно-следственный "
             "анализ событий (Как связаны Магнус и Ариман? Как раскол космодесанта повлиял на Империум?), "
-            "а не единичный факт.\n\n"
+            "а не единичный факт.\n"
+            f"{agentic_instruction}\n"
             "Во всех остальных случаях выбирай 'vector' (Vector RAG), в том числе:\n"
             "- Конкретный факт (Кто убил? В каком году? На какой планете?).\n"
             "- Описание конкретного юнита, персонажа, расы, понятия или явления (Что такое Варп? "
@@ -94,15 +111,20 @@ class WarhammerOrchestrator:
         )
 
     @observe(name="Router Decision")
-    async def classify_route(self, question: str) -> RAGRoute:
+    async def classify_route(self, question: str, config=None) -> RAGRoute:
         try:
             structured_llm = self.llm.with_structured_output(RouteDecision)
             messages = [
                 ("system", self.system_prompt),
                 ("human", f"Вопрос: {question}"),
             ]
-            decision = await structured_llm.ainvoke(messages)
-            return decision.route
+            decision = await structured_llm.ainvoke(messages, config=config)
+            route = decision.route
+            if route == RAGRoute.AGENTIC and not settings.AGENTIC_ROUTE_ENABLED:
+                # Защита: Pydantic-enum технически всегда допускает все три значения,
+                # даже если промпт не предлагал agentic (флаг выключен).
+                return RAGRoute.VECTOR
+            return route
         except Exception as e:
             logger.warning("Router failed (%s), defaulting to vector", e)
             return RAGRoute.VECTOR
@@ -128,64 +150,81 @@ class WarhammerOrchestrator:
         resp["latency_ms"] = int((time.perf_counter() - started) * 1000)
         return resp
 
+    async def _answer_vector(self, question: str, usage_handler=None, include_debug_docs: bool = False) -> dict:
+        result = await self.vector_rag.answer(
+            question, usage_handler=usage_handler, include_debug_docs=include_debug_docs
+        )
+        result["mode"] = "vector"
+        return result
+
+    async def _answer_agentic(self, question: str, usage_handler=None, include_debug_docs: bool = False) -> dict:
+        result = await self.agentic_rag.answer(
+            question, usage_handler=usage_handler, include_debug_docs=include_debug_docs
+        )
+        result["mode"] = result.get("mode", "agentic")
+        return result
+
+    async def _answer_graph(self, question: str, started: float, usage_handler=None) -> dict:
+        ok, probe = await self._domain_probe(question)
+        if not ok:
+            result = self._refuse(
+                probe["retrieval_gate"], probe.get("degraded") or [], started, mode="graph-refused"
+            )
+            result["token_usage"] = summarize_usage(usage_handler) if usage_handler else None
+            return result
+
+        result = await self.light_rag.query(question, mode="hybrid")
+        if result.get("_fallback_to_vector"):
+            vector_result = await self.vector_rag.answer(question, usage_handler=usage_handler)
+            degraded = list(vector_result.get("degraded", []))
+            if "lightrag" not in degraded:
+                degraded.append("lightrag")
+            vector_result["degraded"] = degraded
+            vector_result["mode"] = "vector-fallback"
+            return vector_result
+
+        if _is_lightrag_empty_answer(result.get("answer")):
+            degraded = list(result.get("degraded") or [])
+            for dep in probe.get("degraded") or []:
+                if dep not in degraded:
+                    degraded.append(dep)
+            refused = self._refuse(probe["retrieval_gate"], degraded, started, mode="graph-empty")
+            refused["token_usage"] = summarize_usage(usage_handler) if usage_handler else None
+            return refused
+
+        result.setdefault(
+            "guardrail",
+            {"refused": False, "retrieval_gate": probe["retrieval_gate"]},
+        )
+        degraded = list(result.get("degraded") or [])
+        for dep in probe.get("degraded") or []:
+            if dep not in degraded:
+                degraded.append(dep)
+        result["degraded"] = degraded
+        result.setdefault("cached", False)
+        result["mode"] = result.get("mode", "lightrag-hybrid")
+        result["latency_ms"] = int((time.perf_counter() - started) * 1000)
+        result["sources"] = _normalize_sources(result.get("sources"))
+        # LightRAG сам ничего не сообщает о токенах (внешний сервис, нет такого
+        # поля в ответе) — здесь только то, что успели отследить в этом процессе
+        # (роутер + domain probe), не полная стоимость запроса.
+        result["token_usage"] = summarize_usage(usage_handler) if usage_handler else None
+        return result
+
     @observe(name="Global Orchestrator")
     async def answer(self, question: str):
         started = time.perf_counter()
         with propagate_attributes(tags=["orchestrator", "warhammer"]):
-            route = await self.classify_route(question)
+            usage_handler = new_usage_handler()
+            route = await self.classify_route(question, config={"callbacks": [usage_handler]})
 
             if route == RAGRoute.GRAPH:
-                ok, probe = await self._domain_probe(question)
-                if not ok:
-                    result = self._refuse(
-                        probe["retrieval_gate"],
-                        probe.get("degraded") or [],
-                        started,
-                        mode="graph-refused",
-                    )
-                    score_ask_result(question, result)
-                    return result
+                result = await self._answer_graph(question, started, usage_handler=usage_handler)
+            elif route == RAGRoute.AGENTIC:
+                result = await self._answer_agentic(question, usage_handler=usage_handler)
+            else:
+                result = await self._answer_vector(question, usage_handler=usage_handler)
 
-                result = await self.light_rag.query(question, mode="hybrid")
-                if result.get("_fallback_to_vector"):
-                    vector_result = await self.vector_rag.answer(question)
-                    degraded = list(vector_result.get("degraded", []))
-                    if "lightrag" not in degraded:
-                        degraded.append("lightrag")
-                    vector_result["degraded"] = degraded
-                    vector_result["mode"] = "vector-fallback"
-                    score_ask_result(question, vector_result)
-                    return vector_result
-
-                if _is_lightrag_empty_answer(result.get("answer")):
-                    degraded = list(result.get("degraded") or [])
-                    for dep in probe.get("degraded") or []:
-                        if dep not in degraded:
-                            degraded.append(dep)
-                    refused = self._refuse(
-                        probe["retrieval_gate"], degraded, started, mode="graph-empty"
-                    )
-                    score_ask_result(question, refused)
-                    return refused
-
-                result.setdefault(
-                    "guardrail",
-                    {"refused": False, "retrieval_gate": probe["retrieval_gate"]},
-                )
-                degraded = list(result.get("degraded") or [])
-                for dep in probe.get("degraded") or []:
-                    if dep not in degraded:
-                        degraded.append(dep)
-                result["degraded"] = degraded
-                result.setdefault("cached", False)
-                result["mode"] = result.get("mode", "lightrag-hybrid")
-                result["latency_ms"] = int((time.perf_counter() - started) * 1000)
-                result["sources"] = _normalize_sources(result.get("sources"))
-                score_ask_result(question, result)
-                return result
-
-            result = await self.vector_rag.answer(question)
-            result["mode"] = "vector"
             score_ask_result(question, result)
             return result
 

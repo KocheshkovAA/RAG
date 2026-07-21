@@ -12,8 +12,9 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
 sys.path.insert(0, project_root)
 
 from app.core.config import settings
-from app.core.vectorrag import rag_chain 
+from app.core.vectorrag import rag_chain
 from app.core.reranker import reranker
+from app.eval.metrics import compute_retrieval_metrics
 
 K_VALUES = [3, 5, 10, 20]
 from datetime import datetime
@@ -21,9 +22,6 @@ from datetime import datetime
 # Путь для дампа (создай папку results в app/eval)
 RESULTS_PATH = Path(project_root) / "app/eval/results/eval_full_data.jsonl"
 langfuse_client = get_client()
-
-def normalize_text(text: str) -> str:
-    return text.lower().strip() if text else ""
 
 @observe(name="Retrieval + Generation Collector")
 async def evaluate_one(question_data, use_rerank: bool, collect_answers: bool = False):
@@ -33,14 +31,14 @@ async def evaluate_one(question_data, use_rerank: bool, collect_answers: bool = 
     # ── Подготовка эталонов ──
     expected_titles = question_data.get("article_title", [])
     if isinstance(expected_titles, str): expected_titles = [expected_titles]
-    
+
     expected_quotes = question_data.get("quote", [])
     if isinstance(expected_quotes, str): expected_quotes = [expected_quotes]
     expected_quotes = [q for q in expected_quotes if q and isinstance(q, str)]
 
     # Настройки
     reranker.enabled = use_rerank
-    settings.QUERY_OPTIMIZER_ENABLED = False 
+    settings.QUERY_OPTIMIZER_ENABLED = False
 
     try:
         handler = CallbackHandler()
@@ -55,48 +53,9 @@ async def evaluate_one(question_data, use_rerank: bool, collect_answers: bool = 
         retrieved_titles = [doc.metadata.get("article_name", "UNKNOWN") for doc in final_docs]
         retrieved_contents = [doc.page_content for doc in final_docs]
 
-        metrics = {}
-        
-        # 2. ── Метрики по заголовкам (для всех K) ──
-        for k in K_VALUES:
-            top_k_titles = retrieved_titles[:k]
-            hit = any(any(normalize_text(t) == normalize_text(et) for et in expected_titles) 
-                      for t in top_k_titles if t != "UNKNOWN")
-            found_count = sum(1 for t in top_k_titles if t != "UNKNOWN" and 
-                              any(normalize_text(t) == normalize_text(et) for et in expected_titles))
-            mrr = next((1.0 / (i + 1) for i, t in enumerate(top_k_titles) if t != "UNKNOWN" and 
-                        any(normalize_text(t) == normalize_text(et) for et in expected_titles)), 0.0)
-
-            metrics[f"title_hit@{k}"] = int(hit)
-            metrics[f"title_recall@{k}"] = found_count / len(expected_titles) if expected_titles else 0.0
-            metrics[f"title_precision@{k}"] = found_count / k
-            metrics[f"title_mrr@{k}"] = mrr
-
-        # 3. ── Метрики по цитатам (для всех K) ──
-        norm_expected_quotes = [normalize_text(q) for q in expected_quotes]
-        norm_retrieved_contents = [normalize_text(c) for c in retrieved_contents]
-
-        for k in K_VALUES:
-            top_k_contents = norm_retrieved_contents[:k]
-            if norm_expected_quotes:
-                found_quotes = set()
-                for eq in norm_expected_quotes:
-                    if any(eq in chunk for chunk in top_k_contents):
-                        found_quotes.add(eq)
-                
-                relevant_chunks = sum(1 for chunk in top_k_contents 
-                                      if any(eq in chunk for eq in norm_expected_quotes))
-                
-                mrr_cit = next((1.0 / (i + 1) for i, chunk in enumerate(top_k_contents) 
-                                if any(eq in chunk for eq in norm_expected_quotes)), 0.0)
-
-                metrics[f"citation_recall@{k}"] = len(found_quotes) / len(norm_expected_quotes)
-                metrics[f"citation_hit@{k}"] = 1 if found_quotes else 0
-                metrics[f"citation_precision@{k}"] = relevant_chunks / k
-                metrics[f"citation_mrr@{k}"] = mrr_cit
-            else:
-                metrics.update({f"citation_recall@{k}": 0.0, f"citation_hit@{k}": 0, 
-                                f"citation_precision@{k}": 0.0, f"citation_mrr@{k}": 0.0})
+        metrics = compute_retrieval_metrics(
+            retrieved_titles, retrieved_contents, expected_titles, expected_quotes, K_VALUES
+        )
 
         # 4. ── Генерация ответа и сохранение дампа для RAGAS ──
         if collect_answers:

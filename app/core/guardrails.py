@@ -217,7 +217,7 @@ class AnswerFaithfulnessGuard:
 
     @observe(name="Guardrail: Faithfulness Check")
     async def verify(
-        self, question: str, answer: str, docs: List[Document]
+        self, question: str, answer: str, docs: List[Document], config=None
     ) -> tuple[bool, FaithfulnessVerdict | None, dict[str, Any]]:
         context = self.context_builder.build(docs)
 
@@ -226,7 +226,8 @@ class AnswerFaithfulnessGuard:
             structured = self.llm.with_structured_output(FaithfulnessVerdict)
             chain = self.prompt | structured
             verdict: FaithfulnessVerdict = await chain.ainvoke(
-                {"question": question, "context": context, "answer": answer}
+                {"question": question, "context": context, "answer": answer},
+                config=config,
             )
         except Exception as e:
             return False, None, {

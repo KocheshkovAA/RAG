@@ -20,6 +20,7 @@ from app.core.reranker import reranker
 from app.core.config import settings
 from app.core.guardrails import RetrievalGate, AnswerFaithfulnessGuard
 from app.core.cache import cache_client
+from app.core.usage import new_usage_handler, summarize_usage
 
 logger = logging.getLogger(__name__)
 
@@ -50,22 +51,23 @@ class RAG:
 
     @observe(name="Retrieve Only")
     async def get_relevant_documents(
-        self, question: str, handler=None
+        self, question: str, handler=None, callbacks=None
     ) -> tuple[List[Any], list[str]]:
         """
         Expansion -> Multi-Retrieval -> Rerank.
         Returns: (docs, degraded_components)
         """
         degraded: list[str] = []
+        callbacks = callbacks if callbacks is not None else ([handler] if handler else [])
 
         if settings.QUERY_OPTIMIZER_ENABLED:
             optimizer = QueryOptimizer(self.llm)
-            expanded_queries = await optimizer.process(question)
+            expanded_queries = await optimizer.process(question, config={"callbacks": callbacks})
         else:
             expanded_queries = [question]
 
         tasks = [
-            self.retriever.ainvoke(q, config={"callbacks": [handler] if handler else []})
+            self.retriever.ainvoke(q, config={"callbacks": callbacks})
             for q in expanded_queries
         ]
         docs_results = await asyncio.gather(*tasks)
@@ -87,11 +89,11 @@ class RAG:
         return final_docs, degraded
 
     @observe(name="RAG Pipeline")
-    async def answer(self, question: str):
+    async def answer(self, question: str, usage_handler=None, include_debug_docs: bool = False):
         """Cache → retrieval gate → generate → conditional faithfulness."""
         started = time.perf_counter()
         with propagate_attributes(tags=["rag", "warhammer", "production"]):
-            cached = await cache_client.get_answer(question)
+            cached = await cache_client.get_answer(question, route="vector")
             if cached and cached.get("answer"):
                 cached = dict(cached)
                 cached["cached"] = True
@@ -99,20 +101,23 @@ class RAG:
                 return cached
 
             handler = CallbackHandler()
+            usage_handler = usage_handler or new_usage_handler()
+            callbacks = [handler, usage_handler]
             final_docs, degraded = await self.get_relevant_documents(
-                question, handler=handler
+                question, callbacks=callbacks
             )
 
             gated_docs, gate_meta = self.retrieval_gate.filter_docs(final_docs)
             if not gated_docs:
                 resp = self.retrieval_gate.insufficient_response(gate_meta)
                 resp["degraded"] = degraded
+                resp["token_usage"] = summarize_usage(usage_handler)
                 resp["latency_ms"] = int((time.perf_counter() - started) * 1000)
                 return resp
 
             answer = await self.chain.ainvoke(
                 {"docs": gated_docs, "question": question},
-                config={"callbacks": [handler]},
+                config={"callbacks": callbacks},
             )
             sources = self.source_extractor.extract(gated_docs)
 
@@ -123,12 +128,13 @@ class RAG:
             )
             if need_check:
                 passed, _verdict, faith_meta = await self.faithfulness_guard.verify(
-                    question, answer, gated_docs
+                    question, answer, gated_docs, config={"callbacks": callbacks}
                 )
                 if not passed:
                     refused = self.faithfulness_guard.refuse_response(faith_meta, sources)
                     refused["guardrail"]["retrieval_gate"] = gate_meta
                     refused["degraded"] = degraded
+                    refused["token_usage"] = summarize_usage(usage_handler)
                     refused["latency_ms"] = int((time.perf_counter() - started) * 1000)
                     return refused
             else:
@@ -148,15 +154,21 @@ class RAG:
                 },
                 "degraded": degraded,
                 "cached": False,
+                "token_usage": summarize_usage(usage_handler),
                 "latency_ms": int((time.perf_counter() - started) * 1000),
             }
 
-            # Не кэшируем отказы и деградированные ответы (чтобы не «заморозить» сбой)
+            # Не кэшируем отказы и деградированные ответы (чтобы не «заморозить» сбой).
+            # Кэшируем ДО добавления _debug_docs — Document не сериализуется в JSON,
+            # и debug-поле в принципе не должно попадать в закэшированный ответ.
             if not degraded and not result["guardrail"]["refused"]:
                 try:
-                    await cache_client.set_answer(question, result)
+                    await cache_client.set_answer(question, result, route="vector")
                 except Exception as e:
                     logger.warning("Failed to cache answer: %s", e)
+
+            if include_debug_docs:
+                result["_debug_docs"] = gated_docs
 
             return result
 

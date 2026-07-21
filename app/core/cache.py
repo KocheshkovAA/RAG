@@ -80,11 +80,11 @@ class CacheClient:
             logger.warning("Cache set failed: %s", e)
             self._available = False
 
-    async def get_answer(self, question: str) -> Optional[dict[str, Any]]:
-        return await self.get_json("answer", question)
+    async def get_answer(self, question: str, route: str = "vector") -> Optional[dict[str, Any]]:
+        return await self.get_json(f"answer:{route}", question)
 
-    async def set_answer(self, question: str, payload: dict[str, Any]) -> None:
-        await self.set_json("answer", question, payload, self.ttl_answer)
+    async def set_answer(self, question: str, payload: dict[str, Any], route: str = "vector") -> None:
+        await self.set_json(f"answer:{route}", question, payload, self.ttl_answer)
 
     async def close(self) -> None:
         if self._redis:

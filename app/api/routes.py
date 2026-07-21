@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.core.vectorrag import rag_chain
+from app.core.agentic_rag import AgenticRAG
 from app.core.lightrag_client import LightRAGClient
 from app.core.orchestrator import WarhammerOrchestrator
 from app.core.config import settings
@@ -15,7 +16,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 light_rag = LightRAGClient()
-orchestrator = WarhammerOrchestrator(vector_rag=rag_chain, light_rag=light_rag)
+agentic_rag = AgenticRAG(rag_chain)
+orchestrator = WarhammerOrchestrator(vector_rag=rag_chain, light_rag=light_rag, agentic_rag=agentic_rag)
 
 
 class QuestionRequest(BaseModel):
