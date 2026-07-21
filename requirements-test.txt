@@ -1,0 +1,11 @@
+# Минимальные зависимости для tests/test_guardrails.py (см. CI-workflow).
+# Полный requirements.txt тянет torch/onnxruntime транзитивно через
+# ragas/fastembed/chainlit — этим тестам они не нужны.
+pydantic
+pydantic-settings
+langchain-core
+langchain-gigachat
+langchain-openai
+langfuse
+pytest
+pytest-asyncio
