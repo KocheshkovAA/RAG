@@ -1,18 +1,18 @@
 # Минимальные зависимости для tests/ (см. CI-workflow).
-# Полный requirements.txt тянет ragas/chainlit (тяжёлый ML/UI-стек) — этим
-# тестам они не нужны. fastembed/qdrant-client всё же нужны: agentic_rag.py
-# импортирует reranker.py/vectorrag.py на уровне модуля (обычный, не ленивый
-# импорт — так и должно быть в проде), а они транзитивно тянут qdrant_client
-# и (через embedder.py) fastembed/onnxruntime. Это ~370М, не десятки гигов.
+# Полный requirements.txt тянет ragas/chainlit/fastembed (тяжёлый ML/UI-стек,
+# onnxruntime) — этим тестам они не нужны. RAG/AgenticRAG/LightRAGClient в
+# app/core/{agentic_rag,orchestrator}.py импортируются только под
+# `if TYPE_CHECKING` (см. `from __future__ import annotations` в тех файлах) —
+# именно поэтому не нужен весь vectorrag.py→retriever.py→embedder.py→fastembed
+# хвост. qdrant-client всё же нужен: health.py импортирует QdrantClient на
+# уровне модуля (только импорт класса, без реального сетевого вызова).
 pydantic
 pydantic-settings
 langchain
 langchain-core
 langchain-gigachat
 langchain-openai
-langchain-qdrant
 qdrant-client
-fastembed
 langfuse
 tenacity
 httpx

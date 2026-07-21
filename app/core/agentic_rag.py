@@ -7,8 +7,11 @@ RetrievalGate и AnswerFaithfulnessGuard переиспользуются по �
 когда-то было возможно у graph-маршрута до фикса domain-probe.
 """
 
+from __future__ import annotations
+
 import logging
 import time
+from typing import TYPE_CHECKING
 
 from langfuse import observe, propagate_attributes
 from langfuse.langchain import CallbackHandler
@@ -19,7 +22,13 @@ from app.core.llm import llm_factory
 from app.core.query_processor import QueryReformulator
 from app.core.reranker import reranker
 from app.core.usage import new_usage_handler, summarize_usage
-from app.core.vectorrag import RAG
+
+if TYPE_CHECKING:
+    # Только для type hint — реальный импорт vectorrag.py на уровне модуля
+    # эагерно создаёт rag_chain = RAG() с сетевым обращением к Qdrant при
+    # конструировании Retriever. Незачем тянуть это ради аннотации типа:
+    # AgenticRAG получает vector_rag как обычный duck-typed параметр.
+    from app.core.vectorrag import RAG
 
 logger = logging.getLogger(__name__)
 

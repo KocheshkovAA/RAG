@@ -1,18 +1,25 @@
+from __future__ import annotations
+
 from enum import Enum
 import logging
 import time
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 from langfuse import observe, propagate_attributes
 
 from app.core.llm import llm_factory
-from app.core.vectorrag import RAG
-from app.core.agentic_rag import AgenticRAG
-from app.core.lightrag_client import LightRAGClient
 from app.core.guardrails import RetrievalGate
 from app.core.tracing import score_ask_result
 from app.core.config import settings
 from app.core.usage import new_usage_handler, summarize_usage
+
+if TYPE_CHECKING:
+    # Только для type hints — избегаем эагерного импорта vectorrag.py
+    # (создаёт rag_chain = RAG() с сетевым обращением к Qdrant при импорте).
+    from app.core.vectorrag import RAG
+    from app.core.agentic_rag import AgenticRAG
+    from app.core.lightrag_client import LightRAGClient
 
 logger = logging.getLogger(__name__)
 
