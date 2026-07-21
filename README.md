@@ -36,7 +36,7 @@ RAG-система по Warhammer 40k с гибридной архитектур
 - **Векторная БД**: Qdrant 
 - **Embeddings**: TEI (Text Embeddings Inference) — Qwen3-Embedding-0.6B
 - **Reranker**: vLLM - bge-reranker-v2-m3
-- **LLM**: GigaChat Pro / GigaChat Lite (через API Sber)
+- **LLM**: OpenRouter (любая frontier-модель) или GigaChat Pro / GigaChat Lite (через API Sber) — переключается одной переменной окружения (`LLM_PROVIDER`)
 - **API**: FastAPI
 - **Инфраструктура**:
   - Всё в Docker + Docker Compose
@@ -46,6 +46,13 @@ RAG-система по Warhammer 40k с гибридной архитектур
 
 Сервисы развернуты в docker контейнерах.
 <img width="323" height="310" alt="RAG-Page-3 drawio" src="https://github.com/user-attachments/assets/1d7607d0-90d8-41e1-995a-d24dc6141dbe" />
+
+## MCP-сервер
+Помимо HTTP API (`/v1/ask`), пайплайн обёрнут в MCP tool-сервер (`mcp_server/`) —
+его можно подключить как инструмент к Claude Desktop, Claude Code и другим
+MCP-клиентам, без прямых HTTP-вызовов. Внутри — тот же оркестратор с теми же
+guardrails (retrieval gate, faithfulness check), просто вызванный агентно.
+Поднимается вместе с основным стеком (`make up`, сервис `mcp-server`).
 
 ## Пайплайн
 <img width="326" height="464" alt="RAG-Page-4 drawio" src="https://github.com/user-attachments/assets/9ca31646-69d7-4e65-aa8e-8ef8b716c4ea" />
