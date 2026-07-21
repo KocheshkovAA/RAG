@@ -6,6 +6,7 @@
 docker-сети.
 """
 
+import json
 import os
 
 import httpx
@@ -73,6 +74,59 @@ async def ask_warhammer_lore(question: str, session_id: str = "") -> str:
         )
     except httpx.HTTPStatusError as e:
         return f"API вернул ошибку {e.response.status_code}: {e.response.text[:300]}"
+
+
+@mcp.tool()
+async def debate_warhammer_lore(question: str, session_id: str = "") -> str:
+    """Устроить мини-дебаты персонажей Warhammer 40k по вопросу лора.
+
+    Несколько фиксированных персонажей (Орк-Варбосс, Эльдарский Провидец,
+    Космодесантник) отвечают на один и тот же вопрос каждый в своей манере,
+    опираясь на общий ретрив и те же guardrails, что и обычный запрос —
+    меняется только форма ответа, не факты. API отдаёт это потоково
+    (NDJSON), этот тул собирает весь раунд и возвращает целиком одним текстом.
+    """
+    payload = {"question": question}
+    if session_id:
+        payload["session_id"] = session_id
+
+    lines: list[str] = []
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT_SEC) as client:
+            async with client.stream("POST", f"{API_URL}/v1/debate", json=payload) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line.strip():
+                        continue
+                    event = json.loads(line)
+                    event_type = event.get("type")
+                    if event_type == "turn":
+                        turn = event["turn"]
+                        mark = " [отказ проверки достоверности]" if turn.get("refused") else ""
+                        lines.append(f"### {turn['persona_display_name']}{mark}\n{turn['answer']}")
+                    elif event_type == "refused":
+                        lines.append(event.get("answer") or "(отказ)")
+                    elif event_type == "error":
+                        lines.append(f"[ошибка: {event.get('message')}]")
+                    elif event_type == "done":
+                        sources = event.get("sources") or []
+                        if sources:
+                            src_lines = ["Источники:"]
+                            for s in sources:
+                                if isinstance(s, dict):
+                                    title = s.get("article_name") or s.get("title") or "?"
+                                    url = s.get("url") or ""
+                                    src_lines.append(f"- {title}" + (f" ({url})" if url else ""))
+                            lines.append("\n".join(src_lines))
+    except httpx.ConnectError:
+        return (
+            f"Не удалось подключиться к {API_URL}. "
+            "Проверь, что стек поднят: `make up` в WarhammerWikiBot."
+        )
+    except httpx.HTTPStatusError as e:
+        return f"API вернул ошибку {e.response.status_code}: {e.response.text[:300]}"
+
+    return "\n\n".join(lines) if lines else "(пустой ответ)"
 
 
 @mcp.tool()
