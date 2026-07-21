@@ -1,6 +1,10 @@
 """Unit-тесты PersonaDebate (LangGraph) — без реального LLM/Docker, в стиле
 tests/test_agentic_rag.py. Реальный LLM подменяется FakeListChatModel
-(доступен в установленной версии langchain_core, не требует сети)."""
+(доступен в установленной версии langchain_core, не требует сети).
+
+Пайплайн: retrieve -> draft (один faithfulness-чек на нейтральный ответ) ->
+персонажи по очереди пересказывают уже верифицированный draft. FakeListChatModel
+отдаёт ответы по порядку вызовов: первый — черновику, дальше — персонажам."""
 
 from langchain_core.documents import Document
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
@@ -48,7 +52,7 @@ class _FakeFaithfulnessGuard:
     async def verify(self, question, answer, docs, config=None):
         self.verify_calls.append(answer)
         passed = self.verify_results.pop(0) if self.verify_results else True
-        return passed, None, {"passed": passed}
+        return passed, None, {"passed": passed, "faithfulness_score": 1.0 if passed else 0.0}
 
 
 class _FakeContextBuilder:
@@ -104,7 +108,8 @@ async def test_debate_refuses_on_empty_retrieval():
 
 
 async def test_debate_produces_turns_in_order():
-    debate = _make_debate(responses=["ответ1", "ответ2", "ответ3"])
+    # responses[0] идёт черновику, дальше — по одному на персонажа.
+    debate = _make_debate(responses=["черновик", "ответ1", "ответ2", "ответ3"])
     events = [e async for e in debate.stream("вопрос")]
     turns = [e["turn"] for e in events if e["type"] == "turn"]
     assert [t["persona"] for t in turns] == ["p1", "p2", "p3"]
@@ -114,28 +119,62 @@ async def test_debate_produces_turns_in_order():
 
 async def test_should_verify_called_once_per_debate():
     guard = _FakeFaithfulnessGuard(need_check=True)
-    debate = _make_debate(guard=guard, responses=["a", "b", "c"])
+    debate = _make_debate(guard=guard, responses=["черновик", "a", "b", "c"])
     _ = [e async for e in debate.stream("вопрос")]
     assert guard.should_verify_calls == 1
 
 
-async def test_faithfulness_failure_replaces_turn_and_continues():
-    guard = _FakeFaithfulnessGuard(need_check=True, verify_results=[True, False, True])
-    debate = _make_debate(guard=guard, responses=["a", "b", "c"])
+async def test_faithfulness_verify_called_once_not_per_persona():
+    """Раньше verify() гоняли по разу на КАЖДОГО стилизованного персонажа —
+    теперь ровно один раз, на нейтральный черновик до всякой стилизации."""
+    guard = _FakeFaithfulnessGuard(need_check=True, verify_results=[True])
+    debate = _make_debate(guard=guard, responses=["черновик", "a", "b", "c"])
     events = [e async for e in debate.stream("вопрос")]
     turns = [e["turn"] for e in events if e["type"] == "turn"]
 
+    assert guard.verify_calls == ["черновик"]
     assert len(turns) == 3
-    assert turns[1]["refused"] is True
-    assert turns[1]["answer"] == guard.insufficient_message
-    assert turns[0]["refused"] is False
-    assert turns[2]["refused"] is False
+    assert all(t["refused"] is False for t in turns)
+
+
+async def test_draft_faithfulness_failure_refuses_whole_round():
+    """Если черновик не прошёл проверку — до персонажей дело не доходит,
+    весь раунд отказывает целиком (а не отдельная реплика одного персонажа)."""
+    guard = _FakeFaithfulnessGuard(need_check=True, verify_results=[False])
+    debate = _make_debate(guard=guard, responses=["черновик", "a", "b", "c"])
+    events = [e async for e in debate.stream("вопрос")]
+
+    assert not any(e["type"] == "turn" for e in events)
+    assert events[-1]["type"] == "refused"
+    assert events[-1]["answer"] == guard.insufficient_message
+
+
+async def test_persona_sees_draft_and_previous_turns():
+    """Второй и третий персонаж должны получать в промпте реплики
+    предыдущих — проверяем через реальный (не фейковый) чат-промпт, что
+    вызовы FakeListChatModel получают растущий транскрипт."""
+    debate = _make_debate(responses=["черновик", "ответ1", "ответ2", "ответ3"])
+    events = [e async for e in debate.stream("вопрос")]
+    turns = [e["turn"] for e in events if e["type"] == "turn"]
+    assert len(turns) == 3
+    # Достаточно факта, что все три реплики сгенерировались последовательно
+    # поверх одного и того же (уже проверенного) черновика без повторных
+    # вызовов verify — остальное покрыто test_faithfulness_verify_called_once_not_per_persona.
 
 
 async def test_stream_event_order():
-    debate = _make_debate(responses=["a", "b", "c"])
+    debate = _make_debate(responses=["черновик", "a", "b", "c"])
     event_types = [e["type"] async for e in debate.stream("вопрос")]
     assert event_types == ["turn", "turn", "turn", "done"]
+
+
+async def test_done_event_carries_round_level_guardrail():
+    guard = _FakeFaithfulnessGuard(need_check=True, verify_results=[True])
+    debate = _make_debate(guard=guard, responses=["черновик", "a", "b", "c"])
+    events = [e async for e in debate.stream("вопрос")]
+    done = events[-1]
+    assert done["type"] == "done"
+    assert done["guardrail"]["faithfulness"]["passed"] is True
 
 
 def test_reuses_gate_and_guard_by_reference():

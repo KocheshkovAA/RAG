@@ -1,11 +1,21 @@
 """MVP "дебатов персонажей" на LangGraph.
 
-Несколько фиксированных персонажей отвечают на один вопрос лора, каждый в
-своей манере, опираясь на тот же общий ретрив и те же guardrails, что и
-vector-маршрут (RetrievalGate/AnswerFaithfulnessGuard переиспользуются по
-ссылке, не пересоздаются — тот же принцип, что и у AgenticRAG). Персонажи
-"общаются друг с другом" через общее состояние графа: каждый следующий видит
-финальные (уже прошедшие проверку) ответы предыдущих в этом же раунде.
+Пайплайн разделён на факт и форму:
+1. retrieve — обычный ретрив + retrieval gate (как у vector-маршрута).
+2. draft — ОДИН нейтральный ответ (без персонажа), который проходит
+   faithfulness-проверку ОДИН раз. Если не прошёл — отказ на весь раунд, до
+   персонажей дело не доходит.
+3. персонажи по очереди пересказывают уже верифицированный draft в своей
+   манере, каждый видя финальные реплики предыдущих в этом же раунде и держа
+   в уме, что факты менять нельзя — заново их не проверяем.
+
+Это осознанный отход от прежней версии, где faithfulness гонялась по три
+раза на уже стилизованный (со сленгом/пафосом) текст каждого персонажа —
+подача сбивала LLM-judge с толку не хуже, чем реальная галлюцинация, и стоила
+трёх LLM-вызовов вместо одного на один и тот же контекст/вопрос.
+
+RetrievalGate/AnswerFaithfulnessGuard переиспользуются по ссылке, не
+пересоздаются — тот же принцип, что и у AgenticRAG.
 
 Единственное место в проекте, где реальная нелинейная топология (несколько
 узлов-агентов + общее состояние) оправдывает графовый фреймворк — обычный
@@ -47,9 +57,17 @@ class DebateState(TypedDict, total=False):
     degraded: list[str]
     sources: list
     need_check: bool
+    draft: str
+    faithfulness_meta: dict
     turns: list[dict]
     refused: bool
     refusal_answer: str
+
+
+_DRAFT_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", QA_SYSTEM_PROMPT),
+    ("human", "Контекст:\n{context}\n\nВопрос: {question}"),
+])
 
 
 def _persona_prompt(persona: Persona) -> ChatPromptTemplate:
@@ -58,18 +76,20 @@ def _persona_prompt(persona: Persona) -> ChatPromptTemplate:
         ("system", system),
         (
             "human",
-            "Контекст:\n{context}\n\n"
             "Вопрос: {question}\n\n"
+            "Проверенный ответ (единственный источник фактов — пересказывай "
+            "его, не добавляя и не меняя факты):\n{draft}\n\n"
             "{transcript}"
-            "Дай свой ответ в характере персонажа, опираясь только на контекст.",
+            "Перескажи этот ответ в характере персонажа. Если выше есть реплики "
+            "других участников дебатов — отреагируй на них в своей манере "
+            "(согласись, съязви, возрази по тону), но не трогай факты.",
         ),
     ])
 
 
 def _format_transcript(turns: list[dict]) -> str:
     """Ответы предыдущих персонажей этого раунда — то, что видит следующий
-    персонаж, чтобы реагировать/контрастировать. Использует ФИНАЛЬНЫЙ (уже
-    прошедший faithfulness) текст каждого хода, никогда сырой непроверенный."""
+    персонаж, чтобы реагировать/контрастировать."""
     if not turns:
         return ""
     lines = ["Ответы предыдущих участников дебатов в этом раунде:"]
@@ -94,6 +114,7 @@ class PersonaDebate:
 
         self.personas = personas if personas is not None else PERSONAS
         self.llm = llm if llm is not None else llm_factory.get_llm(temperature=0.4, role="persona")
+        self._draft_chain = _DRAFT_PROMPT | self.llm | StrOutputParser()
         self._chains = {
             p.id: _persona_prompt(p) | self.llm | StrOutputParser()
             for p in self.personas
@@ -103,34 +124,19 @@ class PersonaDebate:
     def _make_persona_node(self, persona: Persona):
         async def node(state: DebateState) -> DebateState:
             transcript = _format_transcript(state.get("turns", []))
-            raw_answer = await self._chains[persona.id].ainvoke(
+            answer = await self._chains[persona.id].ainvoke(
                 {
-                    "context": state["context"],
+                    "draft": state["draft"],
                     "question": state["question"],
                     "transcript": transcript,
                 },
                 config={"callbacks": state.get("callbacks", [])},
             )
-
-            if state.get("need_check"):
-                passed, _verdict, faith_meta = await self.faithfulness_guard.verify(
-                    state["question"], raw_answer, state["gated_docs"],
-                    config={"callbacks": state.get("callbacks", [])},
-                )
-            else:
-                passed, faith_meta = True, {
-                    "enabled": settings.FAITHFULNESS_CHECK_ENABLED,
-                    "passed": True,
-                    "skipped": True,
-                }
-
-            final_answer = raw_answer if passed else self.faithfulness_guard.insufficient_message
             turn = {
                 "persona": persona.id,
                 "persona_display_name": persona.display_name,
-                "answer": final_answer,
-                "refused": not passed,
-                "guardrail": {"faithfulness": faith_meta},
+                "answer": answer,
+                "refused": False,
             }
             return {**state, "turns": state.get("turns", []) + [turn]}
 
@@ -170,9 +176,38 @@ class PersonaDebate:
             "refused": False,
         }
 
+    async def _draft_node(self, state: DebateState) -> DebateState:
+        draft = await self._draft_chain.ainvoke(
+            {"context": state["context"], "question": state["question"]},
+            config={"callbacks": state.get("callbacks", [])},
+        )
+
+        if state.get("need_check"):
+            passed, _verdict, faith_meta = await self.faithfulness_guard.verify(
+                state["question"], draft, state["gated_docs"],
+                config={"callbacks": state.get("callbacks", [])},
+            )
+        else:
+            passed, faith_meta = True, {
+                "enabled": settings.FAITHFULNESS_CHECK_ENABLED,
+                "passed": True,
+                "skipped": True,
+            }
+
+        if not passed:
+            return {
+                **state,
+                "refused": True,
+                "refusal_answer": self.faithfulness_guard.insufficient_message,
+                "faithfulness_meta": faith_meta,
+            }
+
+        return {**state, "draft": draft, "faithfulness_meta": faith_meta, "refused": False}
+
     def _build_graph(self):
         graph = StateGraph(DebateState)
         graph.add_node("retrieve", self._retrieve_node)
+        graph.add_node("draft", self._draft_node)
         graph.set_entry_point("retrieve")
 
         node_ids = [p.id for p in self.personas]
@@ -181,11 +216,15 @@ class PersonaDebate:
 
         first_id = node_ids[0]
 
-        def route_after_retrieve(state: DebateState) -> str:
-            return END if state.get("refused") else first_id
-
         graph.add_conditional_edges(
-            "retrieve", route_after_retrieve, {first_id: first_id, END: END}
+            "retrieve",
+            lambda state: END if state.get("refused") else "draft",
+            {"draft": "draft", END: END},
+        )
+        graph.add_conditional_edges(
+            "draft",
+            lambda state: END if state.get("refused") else first_id,
+            {first_id: first_id, END: END},
         )
         for a, b in zip(node_ids, node_ids[1:]):
             graph.add_edge(a, b)
@@ -216,5 +255,9 @@ class PersonaDebate:
             "type": "done",
             "sources": final_state.get("sources", []),
             "degraded": final_state.get("degraded", []),
+            "guardrail": {
+                "retrieval_gate": final_state.get("gate_meta", {}),
+                "faithfulness": final_state.get("faithfulness_meta", {}),
+            },
             "token_usage": summarize_usage(usage_handler),
         }

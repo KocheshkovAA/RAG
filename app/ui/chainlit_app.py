@@ -86,12 +86,16 @@ def _source_elements(sources: list) -> list[cl.Text]:
 
 
 def _format_debate_meta(data: dict[str, Any]) -> str:
-    """Meta для дебата — не переиспользует _format_meta: у дебата нет единого
-    top-level mode/faithfulness, зато есть any_refused."""
+    """Meta для дебата — не переиспользует _format_meta: у дебата нет top-level
+    mode/cached, зато есть один общий (не по-персонажный) faithfulness-вердикт
+    для черновика, на котором строятся все реплики."""
     parts = [f"**token_usage:** `{(data.get('token_usage') or {}).get('total')}`"]
     degraded = data.get("degraded") or []
     if degraded:
         parts.append(f"**degraded:** `{', '.join(degraded)}`")
+    faith = (data.get("guardrail") or {}).get("faithfulness") or {}
+    if faith and not faith.get("skipped"):
+        parts.append(f"**draft faithfulness:** `{faith.get('faithfulness_score', '—')}`")
     return " · ".join(parts)
 
 
