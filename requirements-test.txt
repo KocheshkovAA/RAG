@@ -1,11 +1,20 @@
-# Минимальные зависимости для tests/test_guardrails.py (см. CI-workflow).
-# Полный requirements.txt тянет torch/onnxruntime транзитивно через
-# ragas/fastembed/chainlit — этим тестам они не нужны.
+# Минимальные зависимости для tests/ (см. CI-workflow).
+# Полный requirements.txt тянет ragas/chainlit (тяжёлый ML/UI-стек) — этим
+# тестам они не нужны. fastembed/qdrant-client всё же нужны: agentic_rag.py
+# импортирует reranker.py/vectorrag.py на уровне модуля (обычный, не ленивый
+# импорт — так и должно быть в проде), а они транзитивно тянут qdrant_client
+# и (через embedder.py) fastembed/onnxruntime. Это ~370М, не десятки гигов.
 pydantic
 pydantic-settings
+langchain
 langchain-core
 langchain-gigachat
 langchain-openai
+langchain-qdrant
+qdrant-client
+fastembed
 langfuse
+tenacity
+httpx
 pytest
 pytest-asyncio
