@@ -2,7 +2,12 @@
 
 from langchain_core.documents import Document
 
-from app.core.guardrails import RetrievalGate, AnswerFaithfulnessGuard, doc_relevance_score
+from app.core.guardrails import (
+    RetrievalGate,
+    AnswerFaithfulnessGuard,
+    doc_relevance_score,
+    is_spelling_variant_in_context,
+)
 
 
 def _doc(score: float, *, rerank: bool = True) -> Document:
@@ -96,3 +101,15 @@ def test_faithfulness_required_when_degraded():
     need, meta = guard.should_verify(docs, degraded=True)
     assert need is True
     assert meta["reason"] == "degraded_pipeline"
+
+
+def test_spelling_variant_detected():
+    """Регресс: верификатор помечал 'Ярик' как unsupported_claim,
+    хотя контекст описывает 'Себастьян Яррик' — та же сущность, опечатка."""
+    context = "Себастьян Яррик — легендарный лорд-комиссар Стального Легиона."
+    assert is_spelling_variant_in_context("Ярик", context) is True
+
+
+def test_spelling_variant_rejects_unrelated_claim():
+    context = "Себастьян Яррик — легендарный лорд-комиссар Стального Легиона."
+    assert is_spelling_variant_in_context("Магнус Красный", context) is False

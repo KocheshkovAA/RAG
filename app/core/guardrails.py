@@ -1,5 +1,7 @@
 """Production guardrails: retrieval gate + conditional faithfulness check."""
 
+import difflib
+import re
 from typing import Any, List, Optional
 
 from langchain_core.documents import Document
@@ -10,6 +12,24 @@ from pydantic import BaseModel, Field
 from app.core.config import settings
 from app.core.llm import llm_factory
 from app.core.postprocessors.context_builder import ContextBuilder
+
+_WORD_RE = re.compile(r"[а-яёА-ЯЁa-zA-Z]{3,}")
+
+
+def is_spelling_variant_in_context(claim: str, context: str, threshold: float = 0.82) -> bool:
+    """True, если claim похож на опечатку/вариант написания сущности, уже есть в контексте.
+
+    Верификатор иногда помечает как unsupported_claim имя, написанное в вопросе
+    с опечаткой (например "Ярик" вместо "Яррик") — это ложное срабатывание,
+    а не признак галлюцинации.
+    """
+    claim_norm = claim.strip().lower()
+    if not claim_norm:
+        return False
+    return any(
+        difflib.SequenceMatcher(None, claim_norm, word).ratio() >= threshold
+        for word in _WORD_RE.findall(context.lower())
+    )
 
 
 class FaithfulnessVerdict(BaseModel):
@@ -144,6 +164,10 @@ class AnswerFaithfulnessGuard:
                     "Ты — строгий верификатор фактов для RAG. "
                     "Проверь, что ОТВЕТ полностью опирается на КОНТЕКСТ.\n"
                     "Штрафуй: выдуманные даты, номера, имена, цифры и связи вне контекста.\n"
+                    "Не штрафуй мелкие орфографические расхождения в написании имён/названий "
+                    "(опечатки, уменьшительные формы, вариативная транслитерация) — если сущность "
+                    "из ВОПРОСА и ОТВЕТА явно совпадает по смыслу с сущностью из КОНТЕКСТА, "
+                    "это не unsupported claim.\n"
                     "Если контекст недостаточен — is_grounded=false.",
                 ),
                 (
@@ -213,18 +237,28 @@ class AnswerFaithfulnessGuard:
                 "reason": "verifier_error",
             }
 
+        filtered_claims = [
+            c for c in verdict.unsupported_claims
+            if not is_spelling_variant_in_context(c, context)
+        ]
+        # Если единственная причина отказа — опечатка/вариант написания уже
+        # известной контексту сущности, не считаем ответ негрунтованным.
+        ignored_spelling_variants = bool(filtered_claims != verdict.unsupported_claims and not filtered_claims)
+        is_grounded = verdict.is_grounded or ignored_spelling_variants
+        faithfulness_score = 1.0 if ignored_spelling_variants else verdict.faithfulness_score
+
         passed = (
-            verdict.is_grounded
-            and verdict.faithfulness_score >= self.min_score
-            and len(verdict.unsupported_claims) == 0
+            is_grounded
+            and faithfulness_score >= self.min_score
+            and len(filtered_claims) == 0
         )
         meta = {
             "enabled": True,
             "passed": passed,
             "skipped": False,
-            "faithfulness_score": verdict.faithfulness_score,
-            "is_grounded": verdict.is_grounded,
-            "unsupported_claims": verdict.unsupported_claims,
+            "faithfulness_score": faithfulness_score,
+            "is_grounded": is_grounded,
+            "unsupported_claims": filtered_claims,
             "reasoning": verdict.reasoning,
             "min_score": self.min_score,
         }
