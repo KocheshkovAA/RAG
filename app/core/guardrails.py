@@ -156,7 +156,7 @@ class AnswerFaithfulnessGuard:
             insufficient_message or settings.INSUFFICIENT_INFO_MESSAGE
         )
         self.context_builder = ContextBuilder()
-        self.llm = llm_factory.get_llm(temperature=0)
+        self.llm = llm_factory.get_llm(temperature=0, role="faithfulness")
         self.prompt = ChatPromptTemplate.from_messages(
             [
                 (

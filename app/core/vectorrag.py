@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 class RAG:
     def __init__(self):
-        self.llm = llm_factory.get_llm(temperature=0.15)
+        self.llm = llm_factory.get_llm(temperature=0.15, role="generation")
         self.retriever = Retriever.from_collection(k=30)
         self.context_builder = ContextBuilder()
         self.source_extractor = SourceExtractor()

@@ -68,7 +68,7 @@ class WarhammerOrchestrator:
     def __init__(self, vector_rag: RAG, light_rag: LightRAGClient):
         self.vector_rag = vector_rag
         self.light_rag = light_rag
-        self.llm = llm_factory.get_llm(temperature=0)
+        self.llm = llm_factory.get_llm(temperature=0, role="router")
         self.retrieval_gate = RetrievalGate()
 
         self.system_prompt = (

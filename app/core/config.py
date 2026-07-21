@@ -69,9 +69,23 @@ class Settings(BaseSettings):
     
     GIGACHAT_CREDENTIALS: str = Field(default="")
     GIGACHAT_MODEL_NAME: str = Field(default="Gigachat")
-    
+
     OPENROUTER_API_KEY: str = Field(default="")
     LLM_MODEL_NAME: str = "qwen/qwen-2.5-72b-instruct"
+
+    # Модель/провайдер по задаче (router/generation/faithfulness) — пустая строка
+    # значит "наследовать LLM_PROVIDER/{GIGACHAT,LLM}_MODEL_NAME по умолчанию".
+    # Позволяет назначить более сильную или локальную модель под конкретную задачу
+    # без изменения кода. LightRAG (граф) настраивается отдельно через свой .env
+    # и сюда не относится — сейчас там уже GigaChat-2-Pro.
+    ROUTER_LLM_PROVIDER: str = Field(default="")
+    ROUTER_LLM_MODEL: str = Field(default="")
+
+    GENERATION_LLM_PROVIDER: str = Field(default="")
+    GENERATION_LLM_MODEL: str = Field(default="")
+
+    FAITHFULNESS_LLM_PROVIDER: str = Field(default="")
+    FAITHFULNESS_LLM_MODEL: str = Field(default="")
 
     model_config = SettingsConfigDict(
         env_file=".env", 
