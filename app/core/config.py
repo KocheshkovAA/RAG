@@ -106,6 +106,18 @@ class Settings(BaseSettings):
     PERSONA_LLM_PROVIDER: str = Field(default="")
     PERSONA_LLM_MODEL: str = Field(default="")
 
+    # --- JUDGE (LLM-as-judge для eval, app/eval/evaluate_generation.py::WarJudge) ---
+    # В отличие от остальных ролей выше, тут дефолты НЕ пустые: судья по
+    # умолчанию обязан быть другой моделью/провайдером, чем generation
+    # (там по умолчанию gigachat), иначе eval рискует оценивать сам себя.
+    # Дефолтная модель — бесплатный тир OpenRouter (":free"), чтобы roль
+    # судьи не стоила денег из коробки. Свободные модели OpenRouter иногда
+    # меняются/выводятся из ротации — если увидишь ошибку про недоступную
+    # модель, проверь актуальный список на https://openrouter.ai/models?max_price=0
+    # и поправь JUDGE_LLM_MODEL в .env.
+    JUDGE_LLM_PROVIDER: str = Field(default="openrouter")
+    JUDGE_LLM_MODEL: str = Field(default="meta-llama/llama-3.3-70b-instruct:free")
+
     # --- PERSONA DEBATE (MVP) ---
     # Отдельный explicit-эндпоинт (/v1/debate), роутер его не выбирает и не
     # знает о нём вообще — это operational kill-switch для дорогой фичи

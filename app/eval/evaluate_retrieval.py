@@ -12,15 +12,20 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
 sys.path.insert(0, project_root)
 
 from app.core.config import settings
+from app.core.llm import resolve_role_config
 from app.core.vectorrag import rag_chain
 from app.core.reranker import reranker
 from app.eval.metrics import compute_retrieval_metrics
+from app.eval.run_manifest import new_run_id, write_manifest
 
 K_VALUES = [3, 5, 10, 20]
 from datetime import datetime
 
-# Путь для дампа (создай папку results в app/eval)
-RESULTS_PATH = Path(project_root) / "app/eval/results/eval_full_data.jsonl"
+RESULTS_DIR = Path(project_root) / "app/eval/results"
+# Один run_id на весь прогон (обе фазы — без/с реранкером — пишут в один и тот
+# же файл, как и раньше), чтобы разные вызовы main() не затирали друг друга.
+RUN_ID = new_run_id()
+RESULTS_PATH = RESULTS_DIR / f"eval_full_data_{RUN_ID}.jsonl"
 langfuse_client = get_client()
 
 @observe(name="Retrieval + Generation Collector")
@@ -131,9 +136,6 @@ def print_table(agg, use_rerank: bool):
         print(row)
 
 async def main():
-    if RESULTS_PATH.exists():
-        RESULTS_PATH.unlink()
-        print(f"♻️ Старый файл {RESULTS_PATH.name} удален.")
     # 1. Без реранкера
     agg_no = await run_evaluation(use_rerank=False)
     print_table(agg_no, False)
@@ -146,9 +148,23 @@ async def main():
     print("\n" + "═" * 100)
     print(f"{'СРАВНЕНИЕ @5':<28} | {'Base':<10} | {'Rerank':<10} | {'Delta'}")
     print("-" * 100)
+    comparison_at_5 = {}
     for m in ["title_hit@5", "title_mrr@5", "citation_recall@5", "citation_precision@5"]:
         v1, v2 = agg_no.get(m, 0), agg_yes.get(m, 0)
+        comparison_at_5[m] = {"no_rerank": v1, "rerank": v2, "delta": v2 - v1}
         print(f"{m:<28} | {v1:<10.3f} | {v2:<10.3f} | {v2-v1:+10.3f}")
+
+    manifest_path = write_manifest(
+        RESULTS_DIR, RUN_ID,
+        dataset_path=str(settings.DATASET_PATH),
+        roles={"generation": resolve_role_config("generation")},
+        results_path=str(RESULTS_PATH.relative_to(project_root)),
+        summary_no_rerank=agg_no,
+        summary_rerank=agg_yes,
+        comparison_at_5=comparison_at_5,
+    )
+    print(f"\nДамп для RAGAS/judge: {RESULTS_PATH}")
+    print(f"Конфиг прогона: {manifest_path}")
 
 if __name__ == "__main__":
     asyncio.run(main())

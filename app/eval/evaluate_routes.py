@@ -21,6 +21,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
 sys.path.insert(0, project_root)
 
 from app.core.config import settings
+from app.core.llm import resolve_role_config
 from app.core.vectorrag import rag_chain
 from app.core.agentic_rag import AgenticRAG
 from app.core.lightrag_client import LightRAGClient
@@ -28,11 +29,17 @@ from app.core.orchestrator import WarhammerOrchestrator, RAGRoute
 from app.core.usage import new_usage_handler
 from app.eval.metrics import compute_retrieval_metrics
 from app.eval.evaluate_generation import WarJudge
+from app.eval.run_manifest import new_run_id, write_manifest
 
 K_VALUES = [3, 5, 10, 20]
-RESULTS_PATH = Path(project_root) / "app/eval/results/route_comparison.jsonl"
+RESULTS_DIR = Path(project_root) / "app/eval/results"
 
 ALL_ROUTES = [RAGRoute.VECTOR, RAGRoute.GRAPH, RAGRoute.AGENTIC]
+
+# Роли, чей провайдер/модель реально влияют на цифры в этом харнессе.
+# "router" намеренно не включён — классификатор здесь обходится (см. докстринг
+# модуля), "persona" сюда не относится (это /v1/debate, не /v1/ask).
+RELEVANT_ROLES = ["generation", "faithfulness", "agentic", "judge"]
 
 
 def _expected_titles_quotes(question_data: dict) -> tuple[list[str], list[str]]:
@@ -100,7 +107,8 @@ def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
-async def run_route(orchestrator: WarhammerOrchestrator, questions: list[dict], route: RAGRoute, judge: WarJudge) -> dict:
+async def run_route(orchestrator: WarhammerOrchestrator, questions: list[dict], route: RAGRoute,
+                     judge: WarJudge, results_path: Path) -> dict:
     rows = []
     for q in questions:
         try:
@@ -117,8 +125,8 @@ async def run_route(orchestrator: WarhammerOrchestrator, questions: list[dict], 
                 row["judge_language_quality"] = score.language_quality
         rows.append(row)
 
-    RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(RESULTS_PATH, "a", encoding="utf-8") as f:
+    results_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(results_path, "a", encoding="utf-8") as f:
         for row in rows:
             f.write(json.dumps({k: v for k, v in row.items() if k != "contexts"}, ensure_ascii=False) + "\n")
 
@@ -180,8 +188,8 @@ async def main():
     args = parser.parse_args()
     selected = [RAGRoute(r.strip()) for r in args.routes.split(",") if r.strip()]
 
-    if RESULTS_PATH.exists():
-        RESULTS_PATH.unlink()
+    run_id = new_run_id()
+    results_path = RESULTS_DIR / f"route_comparison_{run_id}.jsonl"
 
     with open(settings.DATASET_PATH, encoding="utf-8") as f:
         questions = [json.loads(line) for line in f if line.strip()]
@@ -194,10 +202,19 @@ async def main():
     summaries = {}
     for route in selected:
         print(f"\n>>> Прогон маршрута: {route.value} ({len(questions)} вопросов)")
-        summaries[route.value] = await run_route(orchestrator, questions, route, judge)
+        summaries[route.value] = await run_route(orchestrator, questions, route, judge, results_path)
 
     print_comparison_table(summaries)
-    print(f"\nПодробности по каждому вопросу: {RESULTS_PATH}")
+    manifest_path = write_manifest(
+        RESULTS_DIR, run_id,
+        dataset_path=settings.DATASET_PATH,
+        routes=[r.value for r in selected],
+        roles={role: resolve_role_config(role) for role in RELEVANT_ROLES},
+        results_path=str(results_path.relative_to(project_root)),
+        summaries=summaries,
+    )
+    print(f"\nПодробности по каждому вопросу: {results_path}")
+    print(f"Конфиг прогона (модели/провайдеры по ролям): {manifest_path}")
 
 
 if __name__ == "__main__":

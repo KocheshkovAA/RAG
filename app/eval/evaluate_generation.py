@@ -29,7 +29,10 @@ class JudgeScore(BaseModel):
 
 class WarJudge:
     def __init__(self):
-        self.llm = llm_factory.get_llm(temperature=0.0, model_name="GigaChat-Pro")
+        # role="judge" — намеренно не model_name="GigaChat-Pro": та же модель,
+        # что и generation, инфлирует себе оценку (self-bias). См. комментарий
+        # у JUDGE_LLM_PROVIDER/JUDGE_LLM_MODEL в app/core/config.py.
+        self.llm = llm_factory.get_llm(temperature=0.0, role="judge")
         self.structured_llm = self.llm.with_structured_output(JudgeScore)
 
     @observe(name="Judge: Evaluate Response")
@@ -58,10 +61,31 @@ class WarJudge:
             print(f"❌ Error evaluating {row.get('id')}: {e}")
             return None
 
-async def run_mega_eval():
-    input_path = Path("app/eval/results/eval_full_data.jsonl")
-    output_path = Path("app/eval/results/judge_results.csv")
-    
+def _latest_eval_dump(results_dir: Path) -> Optional[Path]:
+    """evaluate_retrieval.py теперь пишет дамп с run_id в имени
+    (eval_full_data_<run_id>.jsonl), поэтому без явного --input берём самый
+    свежий по mtime. Старое фиксированное имя eval_full_data.jsonl тоже
+    подхватится, если вдруг осталось с прошлых запусков."""
+    candidates = sorted(results_dir.glob("eval_full_data_*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not candidates:
+        legacy = results_dir / "eval_full_data.jsonl"
+        if legacy.exists():
+            candidates = [legacy]
+    return candidates[0] if candidates else None
+
+
+async def run_mega_eval(input_path: Optional[str] = None):
+    results_dir = Path("app/eval/results")
+    resolved_input = Path(input_path) if input_path else _latest_eval_dump(results_dir)
+
+    if resolved_input is None:
+        print(f"❌ Не найдено ни одного eval_full_data*.jsonl в {results_dir} — "
+              f"сначала прогони evaluate_retrieval.py")
+        return
+    input_path = resolved_input
+    # Имя выхода наследует run_id входного файла, чтобы не затирать предыдущие оценки
+    output_path = results_dir / (input_path.stem.replace("eval_full_data", "judge_results") + ".csv")
+
     if not input_path.exists():
         print(f"❌ Файл {input_path} не найден!")
         return
@@ -111,4 +135,11 @@ async def run_mega_eval():
         print(f"\n✅ Результаты сохранены в: {output_path}")
 
 if __name__ == "__main__":
-    asyncio.run(run_mega_eval())
+    import argparse
+    parser = argparse.ArgumentParser(description="LLM-judge оценка дампа из evaluate_retrieval.py")
+    parser.add_argument(
+        "--input", default=None,
+        help="Путь к eval_full_data_<run_id>.jsonl (по умолчанию — самый свежий в app/eval/results)",
+    )
+    args = parser.parse_args()
+    asyncio.run(run_mega_eval(args.input))
