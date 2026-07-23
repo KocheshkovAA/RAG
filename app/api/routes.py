@@ -1,8 +1,10 @@
 import json
 import logging
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from app.core.vectorrag import rag_chain
 from app.core.agentic_rag import AgenticRAG
@@ -17,6 +19,7 @@ from app.core.tracing import flush, is_enabled
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+limiter = Limiter(key_func=get_remote_address, enabled=settings.RATE_LIMIT_ENABLED)
 
 light_rag = LightRAGClient()
 agentic_rag = AgenticRAG(rag_chain)
@@ -32,26 +35,27 @@ class QuestionRequest(BaseModel):
 
 
 @router.post("/ask")
-async def ask(request: QuestionRequest):
+@limiter.limit(settings.RATE_LIMIT_ASK)
+async def ask(request: Request, payload: QuestionRequest):
     try:
         # session/user — атрибуты трейса (если tracing включён)
-        if is_enabled() and (request.session_id or request.user_id):
+        if is_enabled() and (payload.session_id or payload.user_id):
             from langfuse import propagate_attributes
 
             attrs = {}
-            if request.session_id:
-                attrs["session_id"] = request.session_id
-            if request.user_id:
-                attrs["user_id"] = request.user_id
+            if payload.session_id:
+                attrs["session_id"] = payload.session_id
+            if payload.user_id:
+                attrs["user_id"] = payload.user_id
             with propagate_attributes(**attrs):
                 result = await with_timeout(
-                    orchestrator.answer(request.question),
+                    orchestrator.answer(payload.question),
                     settings.REQUEST_TIMEOUT_SEC,
                     "ask",
                 )
         else:
             result = await with_timeout(
-                orchestrator.answer(request.question),
+                orchestrator.answer(payload.question),
                 settings.REQUEST_TIMEOUT_SEC,
                 "ask",
             )

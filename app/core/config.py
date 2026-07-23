@@ -42,6 +42,11 @@ class Settings(BaseSettings):
         )
     )
 
+    # --- RATE LIMITING ---
+    RATE_LIMIT_ENABLED: bool = Field(default=True)
+    # Формат slowapi: "<число>/<second|minute|hour|day>"
+    RATE_LIMIT_ASK: str = Field(default="20/minute")
+
     # --- CACHE / RESILIENCE ---
     CACHE_ENABLED: bool = Field(default=True)
     CACHE_TTL_ANSWER_SEC: int = Field(default=600)

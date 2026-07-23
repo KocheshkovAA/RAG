@@ -2,8 +2,10 @@ from contextlib import asynccontextmanager
 import logging
 
 from fastapi import FastAPI
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
-from app.api.routes import router
+from app.api.routes import router, limiter
 from app.core.cache import cache_client
 from app.core.tracing import init_tracing, flush
 
@@ -21,6 +23,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="RAG", lifespan=lifespan)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.include_router(router, prefix="/v1")
 
 

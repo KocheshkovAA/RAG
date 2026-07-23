@@ -3,6 +3,7 @@ fastapi
 uvicorn[standard]
 pydantic-settings
 python-multipart
+slowapi
 
 # LangChain - используем модульную структуру
 langchain

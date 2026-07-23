@@ -114,6 +114,7 @@ async def run_route(orchestrator: WarhammerOrchestrator, questions: list[dict], 
                 row["judge_faithfulness"] = score.faithfulness
                 row["judge_answer_relevance"] = score.answer_relevance
                 row["judge_context_relevance"] = score.context_relevance
+                row["judge_language_quality"] = score.language_quality
         rows.append(row)
 
     RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -127,6 +128,7 @@ async def run_route(orchestrator: WarhammerOrchestrator, questions: list[dict], 
     faithfulness = [r["judge_faithfulness"] for r in rows if "judge_faithfulness" in r]
     answer_rel = [r["judge_answer_relevance"] for r in rows if "judge_answer_relevance" in r]
     context_rel = [r["judge_context_relevance"] for r in rows if "judge_context_relevance" in r]
+    language_quality = [r["judge_language_quality"] for r in rows if "judge_language_quality" in r]
     refusal_rate = sum(1 for r in rows if r["refused"]) / len(rows) if rows else 0.0
 
     has_retrieval_metrics = any(f"title_hit@5" in r for r in rows)
@@ -139,6 +141,7 @@ async def run_route(orchestrator: WarhammerOrchestrator, questions: list[dict], 
         "faithfulness": _mean(faithfulness) if faithfulness else None,
         "answer_relevance": _mean(answer_rel) if answer_rel else None,
         "context_relevance": _mean(context_rel) if context_rel else None,
+        "language_quality": _mean(language_quality) if language_quality else None,
         "avg_latency_ms": _mean(latencies),
         "p95_latency_ms": _percentile(latencies, 0.95),
         "avg_total_tokens": _mean(tokens) if tokens else None,
@@ -151,6 +154,7 @@ def print_comparison_table(summaries: dict[str, dict]):
     cols = [
         ("title_hit@5", "{:.3f}"), ("title_mrr@5", "{:.3f}"), ("citation_recall@5", "{:.3f}"),
         ("faithfulness", "{:.3f}"), ("answer_relevance", "{:.3f}"), ("context_relevance", "{:.3f}"),
+        ("language_quality", "{:.3f}"),
         ("avg_latency_ms", "{:.0f}"), ("p95_latency_ms", "{:.0f}"),
         ("avg_total_tokens", "{:.0f}"), ("avg_iterations", "{:.2f}"), ("refusal_rate", "{:.2f}"),
     ]

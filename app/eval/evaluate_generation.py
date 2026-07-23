@@ -19,6 +19,12 @@ class JudgeScore(BaseModel):
     context_relevance: float = Field(description="Полезность контекста (0-1)")
     faithfulness: float = Field(description="Отсутствие галлюцинаций (0-1)")
     answer_relevance: float = Field(description="Полнота ответа на вопрос (0-1)")
+    language_quality: float = Field(
+        description=(
+            "Качество русского языка ответа (0-1): согласование слов, порядок слов, "
+            "отсутствие калек с английского — не про факты и полноту, а чисто про грамотность"
+        )
+    )
     critique: str = Field(description="Обоснование на русском языке")
 
 class WarJudge:
@@ -30,7 +36,11 @@ class WarJudge:
     async def evaluate_single_row(self, row: dict) -> Optional[JudgeScore]:
         system_prompt = (
             "Ты — эксперт-валидатор данных по вселенной Warhammer 40,000. "
-            "Проведи строгий аудит ответа на основе предоставленного контекста."
+            "Проведи строгий аудит ответа на основе предоставленного контекста.\n"
+            "Отдельно оцени language_quality — качество русского языка ответа "
+            "(согласование слов, порядок слов, отсутствие калек с английского). "
+            "Это независимая ось: грамматически кривой, но фактически верный ответ "
+            "должен получить низкий language_quality при высоком faithfulness, и наоборот."
         )
         
         context_text = "\n---\n".join(row.get("contexts", [])[:3])
@@ -64,7 +74,7 @@ async def run_mega_eval():
 
     print(f"🚀 Начало оценки | Объектов: {len(data)}")
     print("═" * 80)
-    print(f"{'ID':<10} | {'Faith':<6} | {'Relv':<6} | {'Ctx':<6} | {'Critique'}")
+    print(f"{'ID':<10} | {'Faith':<6} | {'Relv':<6} | {'Ctx':<6} | {'Lang':<6} | {'Critique'}")
     print("─" * 80)
 
     for row in data:
@@ -73,14 +83,15 @@ async def run_mega_eval():
             # Печать в консоль всех метрик
             print(f"{str(row.get('id')):<10} | {score.faithfulness:<6.2f} | "
                   f"{score.answer_relevance:<6.2f} | {score.context_relevance:<6.2f} | "
-                  f"{score.critique[:50]}...")
-            
+                  f"{score.language_quality:<6.2f} | {score.critique[:50]}...")
+
             # Собираем данные для сохранения
             result_row = {
                 **row,
                 "judge_faithfulness": score.faithfulness,
                 "judge_answer_relevance": score.answer_relevance,
                 "judge_context_relevance": score.context_relevance,
+                "judge_language_quality": score.language_quality,
                 "judge_critique": score.critique
             }
             evaluated_data.append(result_row)
@@ -89,13 +100,14 @@ async def run_mega_eval():
     if evaluated_data:
         df = pd.DataFrame(evaluated_data)
         df.to_csv(output_path, index=False)
-        
+
         # Финальная статистика
         print("═" * 80)
         print(f"📊 СРЕДНИЕ ПОКАЗАТЕЛИ:")
         print(f"Faithfulness: {df['judge_faithfulness'].mean():.2f}")
         print(f"Relevance:    {df['judge_answer_relevance'].mean():.2f}")
         print(f"Context:      {df['judge_context_relevance'].mean():.2f}")
+        print(f"Language:     {df['judge_language_quality'].mean():.2f}")
         print(f"\n✅ Результаты сохранены в: {output_path}")
 
 if __name__ == "__main__":
