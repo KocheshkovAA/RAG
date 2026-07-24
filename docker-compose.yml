@@ -83,6 +83,11 @@ services:
       environment:
         - CUDA_VISIBLE_DEVICES=0
         - LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu  # ← КЛЮЧЕВОЙ ФИКС
+        # "CUDA unknown error ... changing env variable CUDA_VISIBLE_DEVICES
+        # after program start" при default (fork): CUDA-контекст, тронутый в
+        # родительском API-server процессе, не переживает fork в EngineCore.
+        # spawn пересоздаёт процесс с чистого листа.
+        - VLLM_WORKER_MULTIPROC_METHOD=spawn
       command: >-
         BAAI/bge-reranker-v2-m3
         --runner pooling
