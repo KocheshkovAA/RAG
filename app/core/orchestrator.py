@@ -5,11 +5,12 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
+from langchain_core.documents import Document
 from pydantic import BaseModel, Field
 from langfuse import observe, propagate_attributes
 
 from app.core.llm import llm_factory
-from app.core.guardrails import RetrievalGate
+from app.core.guardrails import RetrievalGate, AnswerFaithfulnessGuard
 from app.core.tracing import score_ask_result
 from app.core.config import settings
 from app.core.usage import new_usage_handler, summarize_usage
@@ -51,6 +52,25 @@ _LIGHTRAG_NO_INFO_STEMS = (
 )
 
 
+def _lightrag_sources_to_documents(sources) -> list[Document]:
+    """LightRAG отдаёт sources/context в своём формате (строки или dict без
+    rerank/hybrid score) — оборачиваем в Document с одним page_content, чтобы
+    переиспользовать ContextBuilder/AnswerFaithfulnessGuard как есть."""
+    if not sources:
+        return []
+    if isinstance(sources, str):
+        return [Document(page_content=sources)]
+    docs = []
+    for s in sources:
+        if isinstance(s, dict):
+            text = s.get("content") or s.get("snippet") or s.get("text") or str(s)
+        else:
+            text = str(s)
+        if text:
+            docs.append(Document(page_content=text))
+    return docs
+
+
 def _is_lightrag_empty_answer(answer) -> bool:
     if not answer or not isinstance(answer, str):
         return True
@@ -82,6 +102,7 @@ class WarhammerOrchestrator:
         self.agentic_rag = agentic_rag
         self.llm = llm_factory.get_llm(temperature=0, role="router")
         self.retrieval_gate = RetrievalGate()
+        self.faithfulness_guard = AnswerFaithfulnessGuard()
 
         agentic_instruction = ""
         if settings.AGENTIC_ROUTE_ENABLED:
@@ -199,14 +220,46 @@ class WarhammerOrchestrator:
             refused["token_usage"] = summarize_usage(usage_handler) if usage_handler else None
             return refused
 
-        result.setdefault(
-            "guardrail",
-            {"refused": False, "retrieval_gate": probe["retrieval_gate"]},
-        )
         degraded = list(result.get("degraded") or [])
         for dep in probe.get("degraded") or []:
             if dep not in degraded:
                 degraded.append(dep)
+
+        # Graph-ответ — multi-hop синтез из нескольких сущностей/фрагментов,
+        # риск галлюцинации выше, чем у vector-маршрута с одним чанком-цитатой.
+        # LightRAG не даёт rerank/hybrid score для своих sources, поэтому
+        # should_verify() естественным образом всегда включает проверку здесь
+        # (нет rerank score -> skip-condition не выполняется), а не только
+        # при деградации, как в vector-пайплайне.
+        faithfulness_docs = _lightrag_sources_to_documents(result.get("sources"))
+        need_check, skip_meta = self.faithfulness_guard.should_verify(
+            faithfulness_docs, degraded=bool(degraded), answer=result.get("answer", "")
+        )
+        if need_check:
+            passed, _verdict, faith_meta = await self.faithfulness_guard.verify(
+                question, result.get("answer", ""), faithfulness_docs
+            )
+            if not passed:
+                refused = self.faithfulness_guard.refuse_response(
+                    faith_meta, _normalize_sources(result.get("sources"))
+                )
+                refused["degraded"] = degraded
+                refused["mode"] = "graph-unfaithful"
+                refused["latency_ms"] = int((time.perf_counter() - started) * 1000)
+                refused["token_usage"] = summarize_usage(usage_handler) if usage_handler else None
+                return refused
+        else:
+            faith_meta = {
+                "enabled": settings.FAITHFULNESS_CHECK_ENABLED,
+                "passed": True,
+                **skip_meta,
+            }
+
+        result["guardrail"] = {
+            "refused": False,
+            "retrieval_gate": probe["retrieval_gate"],
+            "faithfulness": faith_meta,
+        }
         result["degraded"] = degraded
         result.setdefault("cached", False)
         result["mode"] = result.get("mode", "lightrag-hybrid")

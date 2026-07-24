@@ -21,6 +21,7 @@ experiments/judge_results.csv
 
 # Unsloth / LoRA training artifacts
 training/
+/unsloth_compiled_cache/
 
 # Chainlit runtime file cache (per-session generated elements)
 .files/
