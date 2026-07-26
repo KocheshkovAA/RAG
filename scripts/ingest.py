@@ -1,8 +1,9 @@
 import json
 import hashlib
 import uuid
+import httpx
 from qdrant_client import QdrantClient
-from app.core.embedder import embedder
+from app.core.embedder import TEIEmbeddings, BM25SparseEmbeddings
 from qdrant_client.models import Distance, VectorParams, SparseVectorParams, SparseIndexParams, PointStruct, OptimizersConfigDiff
 from app.core.config import settings
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -12,6 +13,8 @@ from itertools import islice
 
 # Инициализация клиента с увеличенным таймаутом (60 секунд)
 client = QdrantClient(url=settings.QDRANT_URL, timeout=60)
+embeddings_dense = TEIEmbeddings()
+embeddings_sparse = BM25SparseEmbeddings()
 
 @retry(
     stop=stop_after_attempt(3),
@@ -20,7 +23,16 @@ client = QdrantClient(url=settings.QDRANT_URL, timeout=60)
 )
 def safe_upsert(points):
     """Обертка для безопасной вставки в Qdrant с ретраями"""
-    client.upsert(collection_name=settings.COLLECTION_NAME, points=points)
+    client.upsert(collection_name=settings.QDRANT_COLLECTION, points=points)
+
+@retry(
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=2, min=2, max=30),
+    retry=retry_if_exception_type(httpx.HTTPStatusError),
+)
+def safe_embed_dense(texts):
+    """TEI отдаёт 429 при перегруженной очереди (особенно на CPU-фолбэке) — ретраим с backoff"""
+    return embeddings_dense.embed_documents(texts)
 
 def generate_deterministic_uuid(text: str):
     hash_obj = hashlib.md5(text.encode())
@@ -28,10 +40,9 @@ def generate_deterministic_uuid(text: str):
 
 def process_batch(batch):
     texts = [item["text"] for item in batch]
-    
-    # Используем наш новый класс
-    dense_vectors = embedder.get_dense_embeddings_sync(texts, is_query=False)
-    sparse_vectors = embedder.get_sparse_embeddings(texts)
+
+    dense_vectors = safe_embed_dense(texts)
+    sparse_vectors = embeddings_sparse.embed_documents(texts)
     
     points = []
     for idx, item in enumerate(batch):
@@ -55,15 +66,15 @@ def process_batch(batch):
     safe_upsert(points)
 
 def run_ingestion():
-    print(f"🚀 Starting ingestion to collection: {settings.COLLECTION_NAME}")
+    print(f"🚀 Starting ingestion to collection: {settings.QDRANT_COLLECTION}")
     
-    if client.collection_exists(settings.COLLECTION_NAME):
-        print(f"♻️ Collection {settings.COLLECTION_NAME} exists. Re-creating...")
-        client.delete_collection(settings.COLLECTION_NAME)
+    if client.collection_exists(settings.QDRANT_COLLECTION):
+        print(f"♻️ Collection {settings.QDRANT_COLLECTION} exists. Re-creating...")
+        client.delete_collection(settings.QDRANT_COLLECTION)
     
     # Создаем коллекцию
     client.create_collection(
-        collection_name=settings.COLLECTION_NAME,
+        collection_name=settings.QDRANT_COLLECTION,
         vectors_config={
             "text-dense": VectorParams(size=settings.VECTOR_SIZE, distance=Distance.COSINE)
         },
@@ -74,7 +85,7 @@ def run_ingestion():
 
     # Оптимизация: временно отключаем индексацию для быстрой заливки тяжелых векторов
     client.update_collection(
-        collection_name=settings.COLLECTION_NAME,
+        collection_name=settings.QDRANT_COLLECTION,
         optimizer_config=OptimizersConfigDiff(indexing_threshold=0)
     )
 
@@ -101,7 +112,7 @@ def run_ingestion():
         # Возвращаем индексацию в стандартный режим после заливки
         print("🏗 Building HNSW index...")
         client.update_collection(
-            collection_name=settings.COLLECTION_NAME,
+            collection_name=settings.QDRANT_COLLECTION,
             optimizer_config=OptimizersConfigDiff(indexing_threshold=200)
         )
         
