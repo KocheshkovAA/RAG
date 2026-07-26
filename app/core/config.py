@@ -122,8 +122,12 @@ class Settings(BaseSettings):
     # оценивать сам себя (self-bias), особенно вредно именно на graph-eval.
     # OpenRouter недоступен из РФ — судья на routerai.ru (OpenAI-совместимый
     # агрегатор, платный, но недорогой на масштабе eval-прогонов).
+    # deepseek-chat (V3, не reasoning) вместо deepseek-v4-pro: v4-pro генерирует
+    # "мышление" перед каждым ответом (поле reasoning) — на масштабе eval-прогона
+    # (десятки вопросов) это заметно замедляет прогон без явной пользы для
+    # задачи judge; deepseek-chat отвечает за ~1-2с вместо заметно дольше.
     JUDGE_LLM_PROVIDER: str = Field(default="routerai")
-    JUDGE_LLM_MODEL: str = Field(default="deepseek/deepseek-v4-pro")
+    JUDGE_LLM_MODEL: str = Field(default="deepseek/deepseek-chat")
 
     # --- PERSONA DEBATE (MVP) ---
     # Отдельный explicit-эндпоинт (/v1/debate), роутер его не выбирает и не
