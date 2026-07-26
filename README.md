@@ -36,7 +36,7 @@ RAG-система по Warhammer 40k с гибридной архитектур
 - **Векторная БД**: Qdrant 
 - **Embeddings**: TEI (Text Embeddings Inference) — Qwen3-Embedding-0.6B
 - **Reranker**: vLLM - bge-reranker-v2-m3
-- **LLM**: OpenRouter (любая frontier-модель) или GigaChat Pro / GigaChat Lite (через API Sber) — переключается одной переменной окружения (`LLM_PROVIDER`)
+- **LLM**: провайдер на роль переключается переменными окружения (`LLM_PROVIDER` + per-role оверрайды) — GigaChat Pro / GigaChat Lite (через API Sber) как основной путь, routerai.ru (OpenAI-совместимый агрегатор с доступом к Claude/GPT/DeepSeek и др., работает из РФ) или OpenRouter как frontier-альтернатива. LLM-судья (см. ниже) намеренно на другом провайдере/модели, чем генерация — так что оценка не грозит self-bias
 - **API**: FastAPI
 - **Инфраструктура**:
   - Всё в Docker + Docker Compose
