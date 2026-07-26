@@ -86,6 +86,12 @@ class Settings(BaseSettings):
     # без явного таймаута ChatOpenAI может ждать неопределённо долго.
     ROUTERAI_TIMEOUT_SEC: float = Field(default=60.0)
 
+    # Self-hosted vLLM на этом же хосте (см. docker-compose.yml, сервис vllm-llm) — учебный
+    # эксперимент по self-hosted инференсу (training/vllm_inference_deepdive.ipynb). Не в
+    # core-стеке, поднимается отдельно. Порт 8003 — то, что реально слушает vllm-llm.
+    VLLM_LOCAL_BASE_URL: str = Field(default="http://vllm-llm:8000/v1")
+    VLLM_LOCAL_MODEL_NAME: str = Field(default="Qwen/Qwen3-4B-AWQ")
+
     # Модель/провайдер по задаче (router/generation/faithfulness) — пустая строка
     # значит "наследовать LLM_PROVIDER/{GIGACHAT,LLM}_MODEL_NAME по умолчанию".
     # Позволяет назначить более сильную или локальную модель под конкретную задачу

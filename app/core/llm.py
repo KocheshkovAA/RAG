@@ -37,6 +37,8 @@ def _resolve_provider_model(role: str | None, model_name: str | None) -> tuple[s
         return provider, model_name or settings.LLM_MODEL_NAME
     elif provider == "routerai":
         return provider, model_name or settings.ROUTERAI_MODEL_NAME
+    elif provider == "vllm-local":
+        return provider, model_name or settings.VLLM_LOCAL_MODEL_NAME
 
     raise ValueError(f"Unknown LLM provider: {provider}")
 
@@ -82,6 +84,22 @@ class LLMFactory:
                 openai_api_base="https://routerai.ru/api/v1",
                 temperature=temperature,
                 timeout=settings.ROUTERAI_TIMEOUT_SEC,
+            )
+
+        elif provider == "vllm-local":
+            # Self-hosted vLLM на этом же хосте (см. docker-compose.yml, сервис vllm-llm) —
+            # OpenAI-совместимый эндпоинт, ключ не нужен, но ChatOpenAI требует непустую строку.
+            # enable_thinking=False обязателен: Qwen3 по умолчанию генерирует <think>...</think>
+            # перед ответом — на живых запросах (26.07) это иногда съедало весь max_tokens ещё
+            # внутри блока рассуждений, оставляя ответ пустым/обрезанным непредсказуемо (не каждый
+            # раз одинаково на один и тот же вопрос). Отключаем reasoning для этой роли явно, а не
+            # полагаемся на дефолт модели.
+            return ChatOpenAI(
+                model=target_model,
+                openai_api_key="not-needed",
+                openai_api_base=settings.VLLM_LOCAL_BASE_URL,
+                temperature=temperature,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
 
         raise ValueError(f"Unknown LLM provider: {provider}")
