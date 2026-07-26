@@ -59,7 +59,6 @@ class Settings(BaseSettings):
 
     QUERY_OPTIMIZER_ENABLED: bool = False
     
-    COLLECTION_NAME: str = "warhammer_wiki"
     DATA_PATH: str = "data/processed/processed_chunks.jsonl"
     VECTOR_SIZE: int = 1024
     
@@ -116,7 +115,7 @@ class Settings(BaseSettings):
     # модель, проверь актуальный список на https://openrouter.ai/models?max_price=0
     # и поправь JUDGE_LLM_MODEL в .env.
     JUDGE_LLM_PROVIDER: str = Field(default="openrouter")
-    JUDGE_LLM_MODEL: str = Field(default="meta-llama/llama-3.3-70b-instruct:free")
+    JUDGE_LLM_MODEL: str = Field(default="nvidia/nemotron-3-super-120b-a12b:free")
 
     # --- PERSONA DEBATE (MVP) ---
     # Отдельный explicit-эндпоинт (/v1/debate), роутер его не выбирает и не

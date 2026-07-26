@@ -93,7 +93,11 @@ class RAG:
         """Cache → retrieval gate → generate → conditional faithfulness."""
         started = time.perf_counter()
         with propagate_attributes(tags=["rag", "warhammer", "production"]):
-            cached = await cache_client.get_answer(question, route="vector")
+            # Кэш-хит выходит раньше, чем ниже добавляется _debug_docs — если
+            # инструментация явно запрошена (eval-харнесс), кэш обходим, иначе
+            # evaluate_routes.py молча теряет retrieval/judge-метрики на любом
+            # вопросе, для которого уже есть тёплый кэш от предыдущего прогона.
+            cached = None if include_debug_docs else await cache_client.get_answer(question, route="vector")
             if cached and cached.get("answer"):
                 cached = dict(cached)
                 cached["cached"] = True

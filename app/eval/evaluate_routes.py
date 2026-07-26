@@ -61,7 +61,9 @@ async def evaluate_question_for_route(orchestrator: WarhammerOrchestrator, quest
     if route == RAGRoute.VECTOR:
         result = await orchestrator._answer_vector(question, usage_handler=usage_handler, include_debug_docs=True)
     elif route == RAGRoute.GRAPH:
-        result = await orchestrator._answer_graph(question, started, usage_handler=usage_handler)
+        result = await orchestrator._answer_graph(
+            question, started, usage_handler=usage_handler, include_debug_docs=True
+        )
     elif route == RAGRoute.AGENTIC:
         result = await orchestrator._answer_agentic(question, usage_handler=usage_handler, include_debug_docs=True)
     else:
