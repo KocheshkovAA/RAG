@@ -53,9 +53,10 @@ _LIGHTRAG_NO_INFO_STEMS = (
 
 
 def _lightrag_sources_to_documents(sources) -> list[Document]:
-    """LightRAG отдаёт sources/context в своём формате (строки или dict без
-    rerank/hybrid score) — оборачиваем в Document с одним page_content, чтобы
-    переиспользовать ContextBuilder/AnswerFaithfulnessGuard как есть."""
+    """LightRAG отдаёт references в своём формате (без rerank/hybrid score,
+    content — список чанков одного файла при include_chunk_content=True) —
+    оборачиваем в Document, чтобы переиспользовать ContextBuilder/
+    AnswerFaithfulnessGuard как есть."""
     if not sources:
         return []
     if isinstance(sources, str):
@@ -63,11 +64,18 @@ def _lightrag_sources_to_documents(sources) -> list[Document]:
     docs = []
     for s in sources:
         if isinstance(s, dict):
-            text = s.get("content") or s.get("snippet") or s.get("text") or str(s)
+            content = s.get("content")
+            if isinstance(content, list):
+                text = "\n\n".join(c for c in content if c)
+            else:
+                text = content or s.get("snippet") or s.get("text") or str(s)
+            file_path = s.get("file_path")
+            article_name = file_path.rsplit(".", 1)[0].replace("_", " ") if file_path else "N/A"
         else:
             text = str(s)
+            article_name = "N/A"
         if text:
-            docs.append(Document(page_content=text))
+            docs.append(Document(page_content=text, metadata={"article_name": article_name}))
     return docs
 
 
@@ -192,7 +200,9 @@ class WarhammerOrchestrator:
         result["mode"] = result.get("mode", "agentic")
         return result
 
-    async def _answer_graph(self, question: str, started: float, usage_handler=None) -> dict:
+    async def _answer_graph(
+        self, question: str, started: float, usage_handler=None, include_debug_docs: bool = False
+    ) -> dict:
         ok, probe = await self._domain_probe(question)
         if not ok:
             result = self._refuse(
@@ -269,6 +279,8 @@ class WarhammerOrchestrator:
         # поля в ответе) — здесь только то, что успели отследить в этом процессе
         # (роутер + domain probe), не полная стоимость запроса.
         result["token_usage"] = summarize_usage(usage_handler) if usage_handler else None
+        if include_debug_docs:
+            result["_debug_docs"] = faithfulness_docs
         return result
 
     @observe(name="Global Orchestrator")

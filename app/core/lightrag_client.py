@@ -21,6 +21,9 @@ class LightRAGClient:
             "mode": mode,
             "enable_rerank": True,
             "top_k": 40,
+            # Без этого references приходят с content=null (только file_path/id) —
+            # faithfulness-гвард и eval-харнесс остаются без реального текста чанков.
+            "include_chunk_content": True,
         }
 
         async def _call() -> dict:
@@ -34,7 +37,7 @@ class LightRAGClient:
                 data = resp.json()
                 return {
                     "answer": data.get("answer", data.get("response", "Нет ответа")),
-                    "sources": data.get("sources", []) or data.get("context", []),
+                    "sources": data.get("references", []),
                     "mode": f"lightrag-{mode}",
                     "degraded": [],
                     "cached": False,
