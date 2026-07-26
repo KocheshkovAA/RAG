@@ -35,6 +35,8 @@ def _resolve_provider_model(role: str | None, model_name: str | None) -> tuple[s
         return provider, model_name or settings.GIGACHAT_MODEL_NAME
     elif provider == "openrouter":
         return provider, model_name or settings.LLM_MODEL_NAME
+    elif provider == "routerai":
+        return provider, model_name or settings.ROUTERAI_MODEL_NAME
 
     raise ValueError(f"Unknown LLM provider: {provider}")
 
@@ -71,6 +73,15 @@ class LLMFactory:
                 openai_api_key=settings.OPENROUTER_API_KEY,
                 openai_api_base="https://openrouter.ai/api/v1",
                 temperature=temperature,
+            )
+
+        elif provider == "routerai":
+            return ChatOpenAI(
+                model=target_model,
+                openai_api_key=settings.ROUTERAI_API_KEY,
+                openai_api_base="https://routerai.ru/api/v1",
+                temperature=temperature,
+                timeout=settings.ROUTERAI_TIMEOUT_SEC,
             )
 
         raise ValueError(f"Unknown LLM provider: {provider}")

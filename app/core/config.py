@@ -77,6 +77,15 @@ class Settings(BaseSettings):
     OPENROUTER_API_KEY: str = Field(default="")
     LLM_MODEL_NAME: str = "qwen/qwen-2.5-72b-instruct"
 
+    # RouterAI (routerai.ru) — OpenAI-совместимый агрегатор, доступный из России
+    # в отличие от OpenRouter. Платный (нет бесплатного тира), но недорогой на
+    # масштабе eval-прогонов (десятки вопросов).
+    ROUTERAI_API_KEY: str = Field(default="")
+    ROUTERAI_MODEL_NAME: str = Field(default="deepseek/deepseek-v4-pro")
+    # deepseek-v4-pro — reasoning-модель (генерирует "мышление" перед ответом),
+    # без явного таймаута ChatOpenAI может ждать неопределённо долго.
+    ROUTERAI_TIMEOUT_SEC: float = Field(default=60.0)
+
     # Модель/провайдер по задаче (router/generation/faithfulness) — пустая строка
     # значит "наследовать LLM_PROVIDER/{GIGACHAT,LLM}_MODEL_NAME по умолчанию".
     # Позволяет назначить более сильную или локальную модель под конкретную задачу
@@ -108,14 +117,13 @@ class Settings(BaseSettings):
     # --- JUDGE (LLM-as-judge для eval, app/eval/evaluate_generation.py::WarJudge) ---
     # В отличие от остальных ролей выше, тут дефолты НЕ пустые: судья по
     # умолчанию обязан быть другой моделью/провайдером, чем generation
-    # (там по умолчанию gigachat), иначе eval рискует оценивать сам себя.
-    # Дефолтная модель — бесплатный тир OpenRouter (":free"), чтобы roль
-    # судьи не стоила денег из коробки. Свободные модели OpenRouter иногда
-    # меняются/выводятся из ротации — если увидишь ошибку про недоступную
-    # модель, проверь актуальный список на https://openrouter.ai/models?max_price=0
-    # и поправь JUDGE_LLM_MODEL в .env.
-    JUDGE_LLM_PROVIDER: str = Field(default="openrouter")
-    JUDGE_LLM_MODEL: str = Field(default="nvidia/nemotron-3-super-120b-a12b:free")
+    # (там по умолчанию gigachat) и чем graph-маршрут (LightRAG использует
+    # GigaChat-2-Pro напрямую, минуя эту настройку) — иначе eval рискует
+    # оценивать сам себя (self-bias), особенно вредно именно на graph-eval.
+    # OpenRouter недоступен из РФ — судья на routerai.ru (OpenAI-совместимый
+    # агрегатор, платный, но недорогой на масштабе eval-прогонов).
+    JUDGE_LLM_PROVIDER: str = Field(default="routerai")
+    JUDGE_LLM_MODEL: str = Field(default="deepseek/deepseek-v4-pro")
 
     # --- PERSONA DEBATE (MVP) ---
     # Отдельный explicit-эндпоинт (/v1/debate), роутер его не выбирает и не
