@@ -125,6 +125,7 @@ async def run_route(orchestrator: WarhammerOrchestrator, questions: list[dict], 
                 row["judge_answer_relevance"] = score.answer_relevance
                 row["judge_context_relevance"] = score.context_relevance
                 row["judge_language_quality"] = score.language_quality
+                row["judge_critique"] = score.critique
         rows.append(row)
 
     results_path.parent.mkdir(parents=True, exist_ok=True)

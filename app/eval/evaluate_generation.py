@@ -12,7 +12,7 @@ sys.path.insert(0, project_root)
 
 from app.core.llm import llm_factory
 from langfuse import observe
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 class JudgeScore(BaseModel):
     """Схема оценки ответа экспертом"""
@@ -26,6 +26,20 @@ class JudgeScore(BaseModel):
         )
     )
     critique: str = Field(description="Обоснование на русском языке")
+
+    # Обнаружено на живых данных (2026-07-26, судья deepseek/deepseek-chat): модель
+    # игнорирует "(0-1)" в описании поля примерно на половине ответов и оценивает
+    # по бытовой шкале 0-10 (8.0/9.0/10.0) вместо 0.0-1.0 — в рамках ОДНОГО прогона,
+    # непредсказуемо по вопросам. Критика при этом всегда содержательно верна, значения
+    # просто на разных шкалах — наивное усреднение 0-1 и 0-10 вперемешку даёт
+    # бессмысленное среднее (~4.6 вместо честных ~0.85-0.9). Нормализуем на входе:
+    # если модель явно посчитала по 10-балльной шкале — приводим к 0-1.
+    @field_validator("context_relevance", "faithfulness", "answer_relevance", "language_quality")
+    @classmethod
+    def _normalize_scale_drift(cls, v: float) -> float:
+        if v > 1.0:
+            v = v / 10.0
+        return max(0.0, min(1.0, v))
 
 class WarJudge:
     def __init__(self):
@@ -43,7 +57,11 @@ class WarJudge:
             "Отдельно оцени language_quality — качество русского языка ответа "
             "(согласование слов, порядок слов, отсутствие калек с английского). "
             "Это независимая ось: грамматически кривой, но фактически верный ответ "
-            "должен получить низкий language_quality при высоком faithfulness, и наоборот."
+            "должен получить низкий language_quality при высоком faithfulness, и наоборот.\n"
+            "ВАЖНО: все четыре числовые оценки — ВЕЩЕСТВЕННОЕ ЧИСЛО СТРОГО ОТ 0.0 ДО 1.0 "
+            "(не 0-10, не проценты). Например: идеальный ответ = 1.0, полностью галлюцинация = 0.0, "
+            "средний ответ с мелкими неточностями = 0.7-0.85. Никогда не пиши 8, 9 или 10 — "
+            "это будет неверно интерпретировано."
         )
         
         context_text = "\n---\n".join(row.get("contexts", [])[:3])
