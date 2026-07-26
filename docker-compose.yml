@@ -62,6 +62,18 @@ services:
   # warhammer_wiki (см. app/eval/compare_configs.py, сценарий finetuned-embeddings).
   # Не входит в core-стек make up — поднимается отдельно: docker compose up -d tei-finetuned.
   tei-finetuned:
+      # GPU здесь не работает и упирается в тупик версий, не просто в конфиг:
+      # :latest/:86-latest бандлят cuda-compat (forward-compat shim), который
+      # NVIDIA не поддерживает на GeForce (только datacenter-карты) — падает
+      # с CUDA_ERROR_COMPAT_NOT_SUPPORTED_ON_DEVICE и тихо откатывается на CPU
+      # (тот же баг у основного `tei` — см. его логи, тоже незаметно на CPU,
+      # там просто хватает CPU для одиночных query-эмбеддингов). Более старый
+      # версионный тег для этой архитектуры (86-1.2, до появления bundled
+      # entrypoint.sh с compat-трюком) собран под CUDA без этой проблемы, но
+      # не умеет парсить config.json современных моделей вроде Qwen3 (вышел
+      # до её поддержки в TEI) — падает на "invalid type: null, expected usize".
+      # Итог: нет версии, которая одновременно новая для модели и старая для
+      # драйвера. Остаёмся на :latest + CPU (функционально работает, медленно).
       image: ghcr.io/huggingface/text-embeddings-inference:latest
       command: >
         --model-id /data/biencoder_finetuned
@@ -106,6 +118,10 @@ services:
       # Пин на последний релиз с CUDA 12.9 (v0.20.0+ перешёл на CUDA 13.0.2,
       # несовместимую с драйвером хоста 535.309.01 / CUDA 12.2 — см. RuntimeError
       # "The NVIDIA driver on your system is too old" при :latest)
+      # gpu-memory-utilization снижен с 0.6 до 0.2 (26.07) — нужно делить карту с vllm-llm
+      # (генерация, Qwen3-4B-AWQ, ~3.7GB) для полностью локального пайплайна. Кросс-энкодер
+      # без автогенерации/растущего KV-cache не требует много — 0.6 было наследием периода,
+      # когда reranker был единственным GPU-сервисом на карте.
       image: vllm/vllm-openai:v0.19.1
       container_name: vllm-reranker
       environment:
@@ -124,11 +140,60 @@ services:
         --port 8000
         --served-model-name bge-reranker-v2-m3
         --max-model-len 2024
-        --gpu-memory-utilization 0.6
+        --gpu-memory-utilization 0.2
         --dtype bfloat16
         --enforce-eager
       ports:
         - "8001:8000"
+      deploy:
+        resources:
+          reservations:
+            devices:
+              - driver: nvidia
+                count: 1
+                capabilities: [gpu]
+      volumes:
+        - ./data/vllm_cache:/root/.cache/huggingface
+      healthcheck:
+        test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+        interval: 15s
+        timeout: 10s
+        retries: 5
+      restart: unless-stopped
+
+  # Self-hosted генерация через vLLM — учебный эксперимент (training/vllm_inference_deepdive.ipynb),
+  # закрывает рыночный гэп из learning_goals.md (vLLM/квантизация встретились в 3 вакансиях).
+  # НЕ входит в core-стек make up, модель НЕ скачана по умолчанию — поднимать явно:
+  #   docker compose stop vllm-reranker   # 6GB VRAM на карте, обе модели разом не влезут
+  #   docker compose up -d vllm-llm       # первый запуск скачает веса с HuggingFace
+  # Версия образа и env — те же грабли, что уже нашли на vllm-reranker (см. его комментарии выше):
+  # :latest уезжает на несовместимую с драйвером хоста CUDA, spawn обязателен для CUDA_VISIBLE_DEVICES.
+  # max-model-len 3072, gpu-memory-utilization 0.68 (26.07, пересчитано под реальные данные):
+  # RERANKER_TOP_K=5 чанков (данные — 59106 чанков, chunk_size=1000, реально p90=1031 симв
+  # ≈319 токенов) + системный промпт (1088 симв ≈337 токенов) в худшем случае (5 чанков около
+  # максимума 1432 симв) дают ~2450 токенов ВХОДА — 2048 гарантированно резал такие вопросы
+  # (см. живой прогон: 2/10 реальных вопросов упали на "input_tokens exceeds max"). 3072 с
+  # запасом покрывает p90-сценарий + фиксированный вывод. Раньше падало на 4096 при utilization
+  # 0.6 ("Available KV cache memory: 0.38 GiB" против нужных 0.56 GiB) — подняли utilization до
+  # 0.68, проверено эмпирически совместно с vllm-reranker (0.2) на этой же карте, не крэшит.
+  vllm-llm:
+      image: vllm/vllm-openai:v0.19.1
+      container_name: vllm-llm
+      environment:
+        - CUDA_VISIBLE_DEVICES=0
+        - LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu
+        - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      command: >-
+        Qwen/Qwen3-4B-AWQ
+        --served-model-name Qwen/Qwen3-4B-AWQ
+        --quantization awq_marlin
+        --host 0.0.0.0
+        --port 8000
+        --max-model-len 3072
+        --gpu-memory-utilization 0.68
+        --enforce-eager
+      ports:
+        - "8003:8000"
       deploy:
         resources:
           reservations:

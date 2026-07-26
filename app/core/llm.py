@@ -100,6 +100,12 @@ class LLMFactory:
                 openai_api_base=settings.VLLM_LOCAL_BASE_URL,
                 temperature=temperature,
                 extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                # Без явного max_tokens модель генерирует, пока не упрётся в ОБЩИЙ бюджет
+                # --max-model-len (вход+выход вместе) — при длинном retrieved-контексте на
+                # вывод оставалось мало места, и связные ответы обрывались непредсказуемо
+                # (см. живые прогоны 26.07). Фиксированный потолок делает бюджет вывода
+                # постоянным независимо от длины промпта.
+                max_tokens=settings.VLLM_LOCAL_MAX_TOKENS,
             )
 
         raise ValueError(f"Unknown LLM provider: {provider}")

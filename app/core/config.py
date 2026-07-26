@@ -91,6 +91,10 @@ class Settings(BaseSettings):
     # core-стеке, поднимается отдельно. Порт 8003 — то, что реально слушает vllm-llm.
     VLLM_LOCAL_BASE_URL: str = Field(default="http://vllm-llm:8000/v1")
     VLLM_LOCAL_MODEL_NAME: str = Field(default="Qwen/Qwen3-4B-AWQ")
+    # Фиксированный потолок вывода — независимый от длины промпта (см. VLLM_LOCAL_MAX_TOKENS
+    # в app/core/llm.py). 500 — с запасом под наблюдаемую длину полных связных ответов (~400-530
+    # токенов на живых прогонах 26.07), с местом под ~2500 токенов входа в max-model-len=3072.
+    VLLM_LOCAL_MAX_TOKENS: int = Field(default=500)
 
     # Модель/провайдер по задаче (router/generation/faithfulness) — пустая строка
     # значит "наследовать LLM_PROVIDER/{GIGACHAT,LLM}_MODEL_NAME по умолчанию".
