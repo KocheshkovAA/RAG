@@ -57,6 +57,34 @@ services:
         timeout: 10s
         retries: 10
 
+  # Второй TEI на дообученном biencoder-чекпоинте (training/biencoder_output/final),
+  # для честного IR-eval дообученных эмбеддингов без трогания прод-коллекции
+  # warhammer_wiki (см. app/eval/compare_configs.py, сценарий finetuned-embeddings).
+  # Не входит в core-стек make up — поднимается отдельно: docker compose up -d tei-finetuned.
+  tei-finetuned:
+      image: ghcr.io/huggingface/text-embeddings-inference:latest
+      command: >
+        --model-id /data/biencoder_finetuned
+        --auto-truncate
+        --max-batch-tokens 2048
+        --max-concurrent-requests 2
+      ports:
+        - "8082:80"
+      volumes:
+        - ./training/biencoder_output/final:/data/biencoder_finetuned:ro
+      deploy:
+        resources:
+          reservations:
+            devices:
+              - driver: nvidia
+                count: 1
+                capabilities: [gpu]
+      healthcheck:
+        test: ["CMD-SHELL", "curl -f http://localhost:80/health || exit 1"]
+        interval: 15s
+        timeout: 10s
+        retries: 10
+
   # CPU
   # tei:
   #   image: ghcr.io/huggingface/text-embeddings-inference:cpu-latest

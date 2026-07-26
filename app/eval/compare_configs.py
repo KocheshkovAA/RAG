@@ -14,8 +14,9 @@ app/core/llm.py:_ROLE_SETTINGS) — переиспользуем его, а не
 переиндексации бессмысленно (документы останутся в старом векторном
 пространстве). Перед сценарием с QDRANT_COLLECTION-оверрайдом:
   1. Поднять второй TEI (или временно подменить model-id) на дообученном
-     чекпоинте (training/biencoder_output/final после biencoder_finetune.ipynb).
-  2. TEI_URL=http://localhost:<port> QDRANT_COLLECTION=warhammer_wiki_finetuned \\
+     чекпоинте (training/biencoder_output/final после biencoder_finetune.ipynb)
+     на порту 8082 — 8081 занят gigachat-adapter (см. docker-compose.yml).
+  2. TEI_URL=http://localhost:8082 QDRANT_COLLECTION=warhammer_wiki_finetuned \\
      python scripts/ingest.py
 Без этого шага сценарий с другой QDRANT_COLLECTION просто упадёт на
 "коллекция не существует" — это ожидаемо, не баг.
@@ -64,7 +65,7 @@ SCENARIOS = [
         "routes": "vector,agentic",
         "env": {
             "QDRANT_COLLECTION": "warhammer_wiki_finetuned",
-            "TEI_URL": "http://localhost:8081",
+            "TEI_URL": "http://localhost:8082",
         },
     },
 ]
