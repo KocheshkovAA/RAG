@@ -31,3 +31,6 @@ training/
 
 # Personal working notes
 /planning/
+
+# Scratch session reports (overnight/autonomous run summaries)
+/OVERNIGHT_REPORT_*.md
