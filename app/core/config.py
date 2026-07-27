@@ -7,6 +7,10 @@ class Settings(BaseSettings):
     # --- Внутренние URL для Docker-сети ---
     QDRANT_URL: str = Field(default="http://qdrant:6333")
     TEI_URL: str = Field(default="http://tei:80")
+    # "tei" — нативный TEI-эндпоинт /embed ({"inputs": [...]} -> [[float]]).
+    # "openai" — OpenAI-совместимый /v1/embeddings (для vLLM --runner pooling,
+    # см. docker-compose.yml vllm-biencoder — GPU-обход бага TEI на GeForce).
+    TEI_API_FORMAT: str = Field(default="tei")
     REDIS_URL: str = Field(default="redis://redis:6379/0")
     
     # --- RERANKER ---

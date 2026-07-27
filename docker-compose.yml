@@ -210,6 +210,47 @@ services:
         retries: 5
       restart: unless-stopped
 
+  # Эксперимент (26.07): TEI не может отдать финетюненный биэнкодер на GPU на этой карте
+  # (см. комментарий tei-finetuned выше — cuda-compat shim не поддерживается на GeForce).
+  # vLLM --runner pooling — тот же трюк, что уже используется для vllm-reranker, но для
+  # чистого эмбеддинг-чекпоинта (Qwen3Model, training/biencoder_output/final). НЕ входит
+  # в core-стек — поднимать явно: docker compose up -d vllm-biencoder.
+  vllm-biencoder:
+      image: vllm/vllm-openai:v0.19.1
+      container_name: vllm-biencoder
+      environment:
+        - CUDA_VISIBLE_DEVICES=0
+        - LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu
+        - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      command: >-
+        /data/biencoder_finetuned
+        --runner pooling
+        --served-model-name biencoder-finetuned
+        --host 0.0.0.0
+        --port 8000
+        --max-model-len 2048
+        --gpu-memory-utilization 0.35
+        --dtype bfloat16
+        --enforce-eager
+      ports:
+        - "8004:8000"
+      deploy:
+        resources:
+          reservations:
+            devices:
+              - driver: nvidia
+                count: 1
+                capabilities: [gpu]
+      volumes:
+        - ./training/biencoder_output/final:/data/biencoder_finetuned:ro
+        - ./data/vllm_cache:/root/.cache/huggingface
+      healthcheck:
+        test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+        interval: 15s
+        timeout: 10s
+        retries: 5
+      restart: unless-stopped
+
   qdrant:
     image: qdrant/qdrant:latest
     ports:

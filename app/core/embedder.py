@@ -14,7 +14,9 @@ class TEIEmbeddings(Embeddings):
     """Dense embeddings через TEI inference сервер (async-first)"""
 
     def __init__(self):
-        self.url = f"{settings.TEI_URL}/embed".rstrip("/")
+        self.api_format = settings.TEI_API_FORMAT
+        base = settings.TEI_URL.rstrip("/")
+        self.url = f"{base}/v1/embeddings" if self.api_format == "openai" else f"{base}/embed"
         self.query_prefix = (
             "Instruct: Given a web search query, retrieve relevant passages "
             "that answer the query\nQuery: "
@@ -23,6 +25,16 @@ class TEIEmbeddings(Embeddings):
             timeout=settings.TEI_TIMEOUT_SEC,
             limits=httpx.Limits(max_connections=100),
         )
+
+    def _request_body(self, texts: List[str]) -> dict:
+        if self.api_format == "openai":
+            return {"model": "biencoder-finetuned", "input": texts}
+        return {"inputs": texts}
+
+    def _parse_response(self, data) -> List[List[float]]:
+        if self.api_format == "openai":
+            return [row["embedding"] for row in data["data"]]
+        return data
 
     @observe(name="TEI embed_documents", capture_output=False)
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
@@ -36,11 +48,11 @@ class TEIEmbeddings(Embeddings):
         processed = texts if not is_query else [f"{self.query_prefix}{t}" for t in texts]
         resp = httpx.post(
             f"{self.url}",
-            json={"inputs": processed},
+            json=self._request_body(processed),
             timeout=settings.TEI_TIMEOUT_SEC,
         )
         resp.raise_for_status()
-        return resp.json()
+        return self._parse_response(resp.json())
 
     @observe(name="TEI aembed_documents", capture_output=False)
     @retry(
@@ -61,10 +73,10 @@ class TEIEmbeddings(Embeddings):
         lf.update_current_trace(input={"count": len(texts), "type": "documents"})
 
         try:
-            resp = await self.client.post(f"{self.url}", json={"inputs": texts})
+            resp = await self.client.post(f"{self.url}", json=self._request_body(texts))
             resp.raise_for_status()
             tei_breaker.record_success()
-            return resp.json()
+            return self._parse_response(resp.json())
         except Exception:
             tei_breaker.record_failure()
             raise
