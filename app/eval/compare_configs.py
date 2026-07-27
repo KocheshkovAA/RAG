@@ -13,11 +13,13 @@ app/core/llm.py:_ROLE_SETTINGS) — переиспользуем его, а не
 переиндексированной дообученной моделью — сравнение query-энкодера без
 переиндексации бессмысленно (документы останутся в старом векторном
 пространстве). Перед сценарием с QDRANT_COLLECTION-оверрайдом:
-  1. Поднять второй TEI (или временно подменить model-id) на дообученном
-     чекпоинте (training/biencoder_output/final после biencoder_finetune.ipynb)
-     на порту 8082 — 8081 занят gigachat-adapter (см. docker-compose.yml).
-  2. TEI_URL=http://localhost:8082 QDRANT_COLLECTION=warhammer_wiki_finetuned \\
-     python scripts/ingest.py
+  1. Поднять vllm-biencoder (docker-compose.yml) — TEI не может отдать
+     дообученный чекпоинт (training/biencoder_output/final) на GPU на этой
+     карте (cuda-compat shim не поддерживается на GeForce, см. комментарий
+     tei-finetuned), поэтому query-энкодер тут — vLLM --runner pooling
+     (OpenAI-совместимый /v1/embeddings): docker compose up -d vllm-biencoder.
+  2. TEI_URL=http://vllm-biencoder:8000 TEI_API_FORMAT=openai \\
+     QDRANT_COLLECTION=warhammer_wiki_finetuned python scripts/ingest.py
 Без этого шага сценарий с другой QDRANT_COLLECTION просто упадёт на
 "коллекция не существует" — это ожидаемо, не баг.
 
@@ -25,7 +27,7 @@ app/core/llm.py:_ROLE_SETTINGS) — переиспользуем его, а не
 классификатор) — другая по природе задача (accuracy классификации, не RAG-
 метрики), сравнивается отдельным скриптом app/eval/compare_router.py.
 
-Запуск: python -m app.eval.compare_configs --scenarios gigachat-baseline,openrouter-frontier
+Запуск: python -m app.eval.compare_configs --scenarios gigachat-baseline,routerai-frontier,vllm-local-generation
 Без --scenarios — прогоняет все сценарии из SCENARIOS ниже.
 """
 
@@ -48,24 +50,39 @@ RESULTS_DIR = Path(project_root) / "app/eval/results"
 SCENARIOS = [
     {
         "name": "gigachat-baseline",
-        "routes": "vector,agentic",
+        "routes": "vector",
         "env": {},
     },
     {
-        "name": "openrouter-frontier",
-        "routes": "vector,agentic",
+        # OpenRouter недоступен из РФ — routerai.ru как доступная frontier-альтернатива.
+        # Модель намеренно ДРУГАЯ, чем judge (routerai/deepseek-chat, см. JUDGE_LLM_MODEL) —
+        # иначе эта конкретная строка сравнения судилась бы той же моделью, что генерировала.
+        "name": "routerai-frontier",
+        "routes": "vector",
         "env": {
-            "GENERATION_LLM_PROVIDER": "openrouter",
-            "GENERATION_LLM_MODEL": "qwen/qwen-2.5-72b-instruct",
+            "GENERATION_LLM_PROVIDER": "routerai",
+            "GENERATION_LLM_MODEL": "deepseek/deepseek-v3.1-terminus",
         },
     },
     {
-        # Требует предварительной переиндексации — см. докстринг модуля.
+        # Self-hosted vLLM на этом же хосте (docker-compose.yml, сервис vllm-llm) — учебный
+        # эксперимент по self-hosted инференсу, training/vllm_inference_deepdive.ipynb.
+        "name": "vllm-local-generation",
+        "routes": "vector",
+        "env": {
+            "GENERATION_LLM_PROVIDER": "vllm-local",
+        },
+    },
+    {
+        # Требует предварительной переиндексации — см. докстринг модуля. TEI на GPU не
+        # работает на этой карте (cuda-compat shim), поэтому query-энкодер — vllm-biencoder
+        # (--runner pooling, OpenAI-совместимый /v1/embeddings, см. docker-compose.yml).
         "name": "finetuned-embeddings",
         "routes": "vector,agentic",
         "env": {
             "QDRANT_COLLECTION": "warhammer_wiki_finetuned",
-            "TEI_URL": "http://localhost:8082",
+            "TEI_URL": "http://vllm-biencoder:8000",
+            "TEI_API_FORMAT": "openai",
         },
     },
 ]
