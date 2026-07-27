@@ -52,7 +52,10 @@ class AgenticRAG:
     async def answer(self, question: str, usage_handler=None, include_debug_docs: bool = False):
         started = time.perf_counter()
         with propagate_attributes(tags=["rag", "warhammer", "agentic"]):
-            cached = await cache_client.get_answer(question, route="agentic")
+            # Кэш-хит выходит раньше, чем ниже добавляется _debug_docs — если
+            # это eval-прогон с include_debug_docs, кэш обходим (см. тот же
+            # паттерн в vectorrag.py RAG.answer).
+            cached = None if include_debug_docs else await cache_client.get_answer(question, route="agentic")
             if cached and cached.get("answer"):
                 cached = dict(cached)
                 cached["cached"] = True

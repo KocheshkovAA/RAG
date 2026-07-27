@@ -109,12 +109,29 @@ def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+async def _evaluate_with_retry(orchestrator: WarhammerOrchestrator, q: dict, route: RAGRoute,
+                                max_attempts: int = 4) -> dict:
+    """GigaChat отдаёт 429 под нагрузкой полного 56-вопросного прогона (не
+    наблюдается на маленьких sample-прогонах) — экспоненциальный backoff
+    только для rate-limit, чтобы не терять строки результата на ровном месте."""
+    for attempt in range(max_attempts):
+        try:
+            return await evaluate_question_for_route(orchestrator, q, route)
+        except Exception as e:
+            is_rate_limit = "429" in str(e) or "Too Many Requests" in str(e)
+            if not is_rate_limit or attempt == max_attempts - 1:
+                raise
+            wait_s = 15 * (2 ** attempt)
+            print(f"  [{route.value}] q{q.get('id')} rate-limited, retry {attempt + 1}/{max_attempts} in {wait_s}s")
+            await asyncio.sleep(wait_s)
+
+
 async def run_route(orchestrator: WarhammerOrchestrator, questions: list[dict], route: RAGRoute,
                      judge: WarJudge, results_path: Path) -> dict:
     rows = []
     for q in questions:
         try:
-            row = await evaluate_question_for_route(orchestrator, q, route)
+            row = await _evaluate_with_retry(orchestrator, q, route)
         except Exception as e:
             print(f"  [{route.value}] q{q.get('id')} failed: {e}")
             continue
