@@ -32,22 +32,60 @@ def is_spelling_variant_in_context(claim: str, context: str, threshold: float = 
     )
 
 
-class FaithfulnessVerdict(BaseModel):
-    """Вердикт пост-проверки: все ли факты ответа подтверждены retrieved-контекстом."""
+class AtomicClaim(BaseModel):
+    """Одно атомарное фактическое утверждение из ответа + его опора в контексте."""
 
-    is_grounded: bool = Field(
-        description="True только если каждое фактическое утверждение ответа прямо следует из контекста"
+    claim: str = Field(
+        description="Одно атомарное фактическое утверждение из ответа: одна дата/номер/имя/связь за раз"
     )
-    faithfulness_score: float = Field(
-        description="Доля утверждений, подтверждённых контекстом (0-1)",
-        ge=0.0,
-        le=1.0,
+    supporting_quote: str = Field(
+        default="",
+        description="Дословная цитата из КОНТЕКСТА, слово в слово подтверждающая claim. "
+        "Пустая строка, если дословного подтверждения в контексте нет.",
     )
-    unsupported_claims: List[str] = Field(
+
+
+class FaithfulnessVerdict(BaseModel):
+    """Вердикт пост-проверки: разбиение ответа на атомарные утверждения с опорой на контекст.
+
+    Грунтованность каждого claim считается программно по supporting_quote (сверка
+    с контекстом), а не по самооценке модели — модель, дающая holistic is_grounded=true,
+    систематически пропускает искажённые атрибуты существующих сущностей (например,
+    подмену номера легиона), потому что оценивает "упомянута ли сущность", а не
+    "подтверждён ли именно этот факт дословно".
+    """
+
+    claims: List[AtomicClaim] = Field(
         default_factory=list,
-        description="Утверждения из ответа, которых нет в контексте",
+        description="Разбиение ОТВЕТА на атомарные фактические утверждения, "
+        "каждое — с дословной подтверждающей цитатой из контекста",
     )
-    reasoning: str = Field(description="Краткое обоснование вердикта")
+    reasoning: str = Field(description="Краткое обоснование итогового вердикта")
+
+
+_MARKUP_RE = re.compile(r"[*_`\"'«»\-–—]")
+
+
+def _normalize_for_match(text: str) -> str:
+    return " ".join(_MARKUP_RE.sub("", text.lower()).split())
+
+
+def is_quote_grounded(quote: str, context: str, min_coverage: float = 0.85) -> bool:
+    """True, если quote — почти дословный фрагмент context (терпимо к markdown/пунктуации,
+    но не к пересказу или выдуманной цитате).
+
+    Модель иногда самооценивает is_grounded=true для ответа, где сущность упомянута
+    в контексте, но конкретный атрибут (номер легиона, дата, число) подменён — сверка
+    цитаты against контекста, а не доверие вердикту модели, ловит именно такие случаи.
+    """
+    quote_norm = _normalize_for_match(quote)
+    if len(quote_norm) < 4:
+        return False
+    context_norm = _normalize_for_match(context)
+    match = difflib.SequenceMatcher(None, quote_norm, context_norm).find_longest_match(
+        0, len(quote_norm), 0, len(context_norm)
+    )
+    return match.size >= min_coverage * len(quote_norm)
 
 
 def doc_relevance_score(doc: Document) -> float:
@@ -161,14 +199,16 @@ class AnswerFaithfulnessGuard:
             [
                 (
                     "system",
-                    "Ты — строгий верификатор фактов для RAG. "
-                    "Проверь, что ОТВЕТ полностью опирается на КОНТЕКСТ.\n"
-                    "Штрафуй: выдуманные даты, номера, имена, цифры и связи вне контекста.\n"
-                    "Не штрафуй мелкие орфографические расхождения в написании имён/названий "
-                    "(опечатки, уменьшительные формы, вариативная транслитерация) — если сущность "
-                    "из ВОПРОСА и ОТВЕТА явно совпадает по смыслу с сущностью из КОНТЕКСТА, "
-                    "это не unsupported claim.\n"
-                    "Если контекст недостаточен — is_grounded=false.",
+                    "Ты — строгий верификатор фактов для RAG.\n"
+                    "Разбей ОТВЕТ на атомарные фактические утверждения (claims): каждое имя, "
+                    "дата, номер (легиона, тома, года), число или связь между сущностями — "
+                    "отдельным пунктом. Вводные фразы и связки в claims не выделяй.\n"
+                    "Для КАЖДОГО claim найди дословную (verbatim) цитату из КОНТЕКСТА, которая "
+                    "прямо его подтверждает, и укажи её в supporting_quote ТОЧНО как в контексте — "
+                    "без пересказа, без изменения чисел/имён.\n"
+                    "Если в контексте нет дословного подтверждения именно этому утверждению — даже "
+                    "если упоминается похожая или связанная сущность — оставь supporting_quote "
+                    "пустой строкой. Не подставляй правдоподобную, но ненайденную цитату.",
                 ),
                 (
                     "human",
@@ -238,28 +278,29 @@ class AnswerFaithfulnessGuard:
                 "reason": "verifier_error",
             }
 
-        filtered_claims = [
-            c for c in verdict.unsupported_claims
-            if not is_spelling_variant_in_context(c, context)
+        # Грунтованность каждого claim — не по самооценке модели, а по сверке
+        # supporting_quote с реальным контекстом (is_quote_grounded). Опечатки/
+        # варианты написания сущности прощаем отдельно, на тексте самого claim.
+        unsupported = [
+            c.claim
+            for c in verdict.claims
+            if not is_quote_grounded(c.supporting_quote, context)
+            and not is_spelling_variant_in_context(c.claim, context)
         ]
-        # Если единственная причина отказа — опечатка/вариант написания уже
-        # известной контексту сущности, не считаем ответ негрунтованным.
-        ignored_spelling_variants = bool(filtered_claims != verdict.unsupported_claims and not filtered_claims)
-        is_grounded = verdict.is_grounded or ignored_spelling_variants
-        faithfulness_score = 1.0 if ignored_spelling_variants else verdict.faithfulness_score
 
-        passed = (
-            is_grounded
-            and faithfulness_score >= self.min_score
-            and len(filtered_claims) == 0
-        )
+        total_claims = len(verdict.claims)
+        faithfulness_score = 1.0 if total_claims == 0 else (total_claims - len(unsupported)) / total_claims
+        is_grounded = len(unsupported) == 0
+
+        passed = is_grounded and faithfulness_score >= self.min_score
         meta = {
             "enabled": True,
             "passed": passed,
             "skipped": False,
-            "faithfulness_score": faithfulness_score,
+            "faithfulness_score": round(faithfulness_score, 4),
             "is_grounded": is_grounded,
-            "unsupported_claims": filtered_claims,
+            "unsupported_claims": unsupported,
+            "claims_checked": total_claims,
             "reasoning": verdict.reasoning,
             "min_score": self.min_score,
         }
