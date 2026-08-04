@@ -236,6 +236,7 @@ class AnswerFaithfulnessGuard:
         enabled: Optional[bool] = None,
         min_score: Optional[float] = None,
         insufficient_message: Optional[str] = None,
+        consistency_samples: Optional[int] = None,
     ):
         self.enabled = (
             enabled if enabled is not None else settings.FAITHFULNESS_CHECK_ENABLED
@@ -244,6 +245,12 @@ class AnswerFaithfulnessGuard:
             min_score if min_score is not None else settings.FAITHFULNESS_MIN_SCORE
         )
         self.skip_above = settings.FAITHFULNESS_SKIP_ABOVE
+        self.consistency_samples = max(
+            1,
+            consistency_samples
+            if consistency_samples is not None
+            else settings.FAITHFULNESS_CONSISTENCY_SAMPLES,
+        )
         self.insufficient_message = (
             insufficient_message or settings.INSUFFICIENT_INFO_MESSAGE
         )
@@ -363,28 +370,18 @@ class AnswerFaithfulnessGuard:
             "has_rerank": has_rerank,
         }
 
-    @observe(name="Guardrail: Faithfulness Check")
-    async def verify(
-        self, question: str, answer: str, docs: List[Document], config=None
-    ) -> tuple[bool, FaithfulnessVerdict | None, dict[str, Any]]:
-        context = self.context_builder.build(docs)
-
-        try:
-            # GigaChat требует description у схемы — создаём tool внутри try
-            structured = self.llm.with_structured_output(FaithfulnessVerdict)
-            chain = self.prompt | structured
-            verdict: FaithfulnessVerdict = await chain.ainvoke(
-                {"question": question, "context": context, "answer": answer},
-                config=config,
-            )
-        except Exception as e:
-            return False, None, {
-                "enabled": True,
-                "passed": False,
-                "skipped": False,
-                "error": str(e),
-                "reason": "verifier_error",
-            }
+    async def _verify_once(
+        self, question: str, answer: str, context: str, config=None
+    ) -> tuple[float, list[str], int, FaithfulnessVerdict]:
+        """Один проход: извлечь claims, прогнать оба слоя грунтовки, посчитать score.
+        Бросает исключение при сбое LLM-вызова — вызывающий (verify()) решает, что делать."""
+        # GigaChat требует description у схемы — создаём tool внутри try в verify()
+        structured = self.llm.with_structured_output(FaithfulnessVerdict)
+        chain = self.prompt | structured
+        verdict: FaithfulnessVerdict = await chain.ainvoke(
+            {"question": question, "context": context, "answer": answer},
+            config=config,
+        )
 
         # Два независимых слоя, оба должны пройти, иначе claim unsupported:
         # 1) is_quote_grounded (дёшево, без LLM) — цитата реально есть в контексте
@@ -409,24 +406,53 @@ class AnswerFaithfulnessGuard:
         ]
 
         total_claims = len(verdict.claims)
-        faithfulness_score = 1.0 if total_claims == 0 else (total_claims - len(unsupported)) / total_claims
+        score = 1.0 if total_claims == 0 else (total_claims - len(unsupported)) / total_claims
+        return score, unsupported, total_claims, verdict
+
+    @observe(name="Guardrail: Faithfulness Check")
+    async def verify(
+        self, question: str, answer: str, docs: List[Document], config=None
+    ) -> tuple[bool, FaithfulnessVerdict | None, dict[str, Any]]:
+        context = self.context_builder.build(docs)
+
+        # Self-consistency: тот же (question, answer, context) прогоняется через
+        # _verify_once() consistency_samples раз (default 1 = выключено, см. config.py —
+        # опробовано с 2, не оправдало латency-цену), score усредняется. Живой замер
+        # (docs/prompt-regression.md) показал, что верификатор нестабилен даже на
+        # ФИКСИРОВАННОМ ответе — три прогона на одном и том же тексте дали 0.71/0.67/0.57,
+        # то есть источник шума не в генерации ответа (temperature), а в самом
+        # LLM-вызове верификации. Усреднение нескольких независимых прогонов — стандартный
+        # приём против этого (self-consistency), не "перезапуск до нужного результата":
+        # решение по среднему, а не по лучшему из попыток.
+        samples: list[tuple[float, list[str], int, FaithfulnessVerdict]] = []
+        for _ in range(self.consistency_samples):
+            try:
+                samples.append(await self._verify_once(question, answer, context, config=config))
+            except Exception as e:
+                return False, None, {
+                    "enabled": True,
+                    "passed": False,
+                    "skipped": False,
+                    "error": str(e),
+                    "reason": "verifier_error",
+                }
+
+        scores = [s[0] for s in samples]
+        avg_score = sum(scores) / len(scores)
+        passed = avg_score >= self.min_score
+
+        # Представительный сэмпл для unsupported_claims/verdict в meta — ближайший к
+        # среднему по score, не первый и не "лучший" (чтобы не искажать отчёт в пользу
+        # прохождения).
+        _, unsupported, total_claims, verdict = min(samples, key=lambda s: abs(s[0] - avg_score))
         is_grounded = len(unsupported) == 0
 
-        # Порог по score, не all-or-nothing: с zero-tolerance (passed = is_grounded and ...)
-        # min_score был мёртвым кодом — is_grounded уже требовал unsupported == 0, из-за
-        # чего score всегда оказывался либо 1.0 (grounded), либо ниже порога (not grounded),
-        # так что >= min_score никогда не решал ничего самостоятельно. На живом прогоне (10
-        # vector-вопросов) zero-tolerance давал 60% refusal_rate — модель почти всегда даёт
-        # ХОТЯ БЫ одну неидеально дословную цитату среди 5-7 claims, и одна такая цитата
-        # рушила весь ответ, даже когда остальные claims были безупречно подтверждены.
-        # min_score (0.7 по умолчанию) — реальный, настраиваемый допуск: до 30% claims
-        # могут не пройти строгую проверку цитаты, не проваливая ответ целиком.
-        passed = faithfulness_score >= self.min_score
         meta = {
             "enabled": True,
             "passed": passed,
             "skipped": False,
-            "faithfulness_score": round(faithfulness_score, 4),
+            "faithfulness_score": round(avg_score, 4),
+            "sample_scores": [round(s, 4) for s in scores],
             "is_grounded": is_grounded,
             "unsupported_claims": unsupported,
             "claims_checked": total_claims,

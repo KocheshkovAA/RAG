@@ -27,7 +27,13 @@ logger = logging.getLogger(__name__)
 
 class RAG:
     def __init__(self):
-        self.llm = llm_factory.get_llm(temperature=0.15, role="generation")
+        # temperature=0, не 0.15: живой прогон (5x один и тот же вопрос, одни и те же
+        # документы) показал, что при 0.15 разброс в тексте ответа между вызовами приводит
+        # к нестабильному числу извлекаемых atomic claims (4-8 для одного вопроса) и,
+        # следом, к нестабильному faithfulness_score вокруг порога (docs/prompt-regression.md).
+        # Для фактологического RAG-ответа детерминированность важнее лёгкой стилевой
+        # вариативности, которую давала температура.
+        self.llm = llm_factory.get_llm(temperature=0, role="generation")
         self.retriever = Retriever.from_collection(k=30)
         self.context_builder = ContextBuilder()
         self.source_extractor = SourceExtractor()

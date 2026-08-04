@@ -410,3 +410,54 @@ async def test_verify_passes_on_score_threshold_despite_one_unsupported_claim():
     assert meta["is_grounded"] is False  # информационно всё ещё False — не всё подтверждено
     assert meta["unsupported_claims"] == ["Магнус — бог хаоса"]
     assert meta["faithfulness_score"] == round(2 / 3, 4)
+
+
+async def test_verify_averages_score_across_consistency_samples():
+    """Self-consistency: живой замер (docs/prompt-regression.md) показал, что верификатор
+    даёт разный score на ОДНОМ И ТОМ ЖЕ (question, answer, context) от вызова к вызову —
+    источник шума не в генерации ответа, а в самом LLM-вызове верификации. Здесь фейковый
+    LLM отдаёт разные вердикты на двух последовательных вызовах (0.5 и 1.0) — итоговый
+    score должен быть средним (0.75), а не первым/лучшим/худшим из двух."""
+    guard = AnswerFaithfulnessGuard(enabled=True, min_score=0.6, consistency_samples=2)
+    doc = Document(page_content="Магнус — примарх XV легиона.", metadata={"rerank_score": 0.9})
+
+    verdict_low = FaithfulnessVerdict(
+        claims=[
+            AtomicClaim(claim="Магнус — примарх XV легиона", supporting_quote="Магнус — примарх XV легиона."),
+            AtomicClaim(claim="Магнус — бог", supporting_quote="выдуманная цитата"),
+        ],
+        reasoning="сэмпл 1",
+    )
+    verdict_high = FaithfulnessVerdict(
+        claims=[
+            AtomicClaim(claim="Магнус — примарх XV легиона", supporting_quote="Магнус — примарх XV легиона."),
+        ],
+        reasoning="сэмпл 2",
+    )
+
+    class _AlternatingLLM:
+        def __init__(self):
+            self._verdict_calls = 0
+
+        def with_structured_output(self, schema):
+            if schema is FaithfulnessVerdict:
+                async def _fn(_pv):
+                    self._verdict_calls += 1
+                    return verdict_low if self._verdict_calls == 1 else verdict_high
+
+                return RunnableLambda(_fn)
+            if schema is EntailmentCheck:
+                async def _fn(_pv):
+                    return EntailmentCheck(verdicts=[ClaimEntailment(entailed=True)])
+
+                return RunnableLambda(_fn)
+            raise AssertionError(f"unexpected schema {schema}")
+
+    guard.llm = _AlternatingLLM()
+
+    passed, _verdict, meta = await guard.verify("вопрос", "ответ", [doc])
+
+    # сэмпл 1: 1 из 2 claims подтверждён -> 0.5; сэмпл 2: 1 из 1 -> 1.0; среднее -> 0.75.
+    assert meta["sample_scores"] == [0.5, 1.0]
+    assert meta["faithfulness_score"] == 0.75
+    assert passed is True  # 0.75 >= 0.6
