@@ -11,6 +11,7 @@ from langfuse import observe, propagate_attributes
 
 from app.core.llm import llm_factory
 from app.core.guardrails import RetrievalGate, AnswerFaithfulnessGuard
+from app.core.observability import log_ask_result
 from app.core.tracing import score_ask_result
 from app.core.config import settings
 from app.core.usage import new_usage_handler, summarize_usage
@@ -298,6 +299,7 @@ class WarhammerOrchestrator:
                 result = await self._answer_vector(question, usage_handler=usage_handler)
 
             score_ask_result(question, result)
+            log_ask_result(question, result)
             return result
 
 

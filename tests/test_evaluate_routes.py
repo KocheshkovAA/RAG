@@ -2,9 +2,9 @@
 агрегаты по агентным решениям) — без LLM/сети/Docker, только на синтетических result-дictах
 в форме, которую реально отдают RAG.answer()/AgenticRAG.answer()/orchestrator._answer_graph()."""
 
+from app.core.guardrails import refusal_reason
 from app.core.orchestrator import RAGRoute
 from app.eval.evaluate_routes import (
-    _refusal_reason,
     build_result_row,
     compute_agent_decision_aggregates,
 )
@@ -14,12 +14,12 @@ def _question(id_=1, question="вопрос?"):
     return {"id": id_, "question": question}
 
 
-# --------------------------------------------------------------------------- _refusal_reason
+# --------------------------------------------------------------------------- refusal_reason
 
 
 def test_refusal_reason_none_when_not_refused():
     result = {"guardrail": {"refused": False}}
-    assert _refusal_reason(result) is None
+    assert refusal_reason(result) is None
 
 
 def test_refusal_reason_retrieval_gate():
@@ -30,7 +30,7 @@ def test_refusal_reason_retrieval_gate():
             "faithfulness": None,
         }
     }
-    assert _refusal_reason(result) == "retrieval_gate:below_similarity_threshold"
+    assert refusal_reason(result) == "retrieval_gate:below_similarity_threshold"
 
 
 def test_refusal_reason_faithfulness():
@@ -42,7 +42,7 @@ def test_refusal_reason_faithfulness():
     }
     # Продовый verify() не кладёт "reason" в обычный (не verifier_error) провал —
     # должен быть честный дефолт, а не KeyError/None.
-    assert _refusal_reason(result) == "faithfulness:unsupported_claims"
+    assert refusal_reason(result) == "faithfulness:unsupported_claims"
 
 
 def test_refusal_reason_faithfulness_verifier_error():
@@ -52,7 +52,7 @@ def test_refusal_reason_faithfulness_verifier_error():
             "faithfulness": {"passed": False, "reason": "verifier_error"},
         }
     }
-    assert _refusal_reason(result) == "faithfulness:verifier_error"
+    assert refusal_reason(result) == "faithfulness:verifier_error"
 
 
 def test_refusal_reason_graph_empty_falls_back_to_mode():
@@ -66,7 +66,7 @@ def test_refusal_reason_graph_empty_falls_back_to_mode():
             "faithfulness": None,
         },
     }
-    assert _refusal_reason(result) == "mode:graph-empty"
+    assert refusal_reason(result) == "mode:graph-empty"
 
 
 # --------------------------------------------------------------------------- build_result_row

@@ -23,6 +23,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
 sys.path.insert(0, project_root)
 
 from app.core.config import settings
+from app.core.guardrails import refusal_reason
 from app.core.llm import resolve_role_config
 from app.core.vectorrag import rag_chain
 from app.core.agentic_rag import AgenticRAG
@@ -55,24 +56,6 @@ def _expected_titles_quotes(question_data: dict) -> tuple[list[str], list[str]]:
     return expected_titles, expected_quotes
 
 
-def _refusal_reason(result: dict) -> Optional[str]:
-    """Не просто "отказал", а почему — гейт релевантности, faithfulness-верификация или
-    graph-специфичный режим (LightRAG ответил "нет данных" текстом, а не пустым результатом,
-    см. _is_lightrag_empty_answer в orchestrator.py). Нужно, чтобы отличать "агент отказался,
-    потому что ничего не нашёл" от "нашёл, но Reflection не пропустила ответ"."""
-    guardrail = result.get("guardrail") or {}
-    if not guardrail.get("refused"):
-        return None
-    gate = guardrail.get("retrieval_gate") or {}
-    if gate.get("passed") is False:
-        return f"retrieval_gate:{gate.get('reason', 'unknown')}"
-    faith = guardrail.get("faithfulness") or {}
-    if faith.get("passed") is False:
-        return "faithfulness:" + (faith.get("reason") or "unsupported_claims")
-    mode = result.get("mode")
-    return f"mode:{mode}" if mode else "unknown"
-
-
 def build_result_row(question_data: dict, route: RAGRoute, result: dict) -> dict:
     """Общая сборка строки для evaluate_routes.py и evaluate_capstone.py — не только
     "хватило ли контекста" (retrieval-метрики), но и агентные решения: почему отказал,
@@ -97,7 +80,7 @@ def build_result_row(question_data: dict, route: RAGRoute, result: dict) -> dict
         "answer": result.get("answer"),
         "latency_ms": result.get("latency_ms"),
         "refused": bool(guardrail.get("refused")),
-        "refusal_reason": _refusal_reason(result),
+        "refusal_reason": refusal_reason(result),
         "degraded": result.get("degraded") or [],
         "token_usage": token_total,
         "iterations": agentic_meta.get("iterations"),
