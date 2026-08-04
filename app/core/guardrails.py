@@ -1,6 +1,7 @@
 """Production guardrails: retrieval gate + conditional faithfulness check."""
 
 import difflib
+import logging
 import re
 from typing import Any, List, Optional
 
@@ -12,6 +13,8 @@ from pydantic import BaseModel, Field
 from app.core.config import settings
 from app.core.llm import llm_factory
 from app.core.postprocessors.context_builder import ContextBuilder
+
+logger = logging.getLogger(__name__)
 
 _WORD_RE = re.compile(r"[а-яёА-ЯЁa-zA-Z]{3,}")
 
@@ -94,6 +97,27 @@ def is_quote_grounded(quote: str, context: str, min_coverage: float = 0.85) -> b
         0, len(quote_norm), 0, len(context_norm)
     )
     return match.size >= min_coverage * len(quote_norm)
+
+
+class ClaimEntailment(BaseModel):
+    """Вердикт по одной паре (утверждение, цитата): подтверждает ли цитата именно это
+    утверждение дословно и по фактам, а не только тематически."""
+
+    entailed: bool = Field(
+        description="True только если цитата ТОЧНО подтверждает именно это утверждение — "
+        "включая числа, имена, даты, названия. Тематическое совпадение (та же сущность, "
+        "но другое число/имя/дата) — False."
+    )
+
+
+class EntailmentCheck(BaseModel):
+    """Список вердиктов entailment — по одному на каждую входную пару (утверждение, цитата),
+    в том же порядке, что и на входе."""
+
+    verdicts: List[ClaimEntailment] = Field(
+        description="Ровно один вердикт на каждую пару (утверждение, цитата) из входного "
+        "списка, СТРОГО в том же порядке — не пропускай и не переставляй пары."
+    )
 
 
 def doc_relevance_score(doc: Document) -> float:
@@ -224,6 +248,54 @@ class AnswerFaithfulnessGuard:
                 ),
             ]
         )
+        # Второй, отдельный LLM-вызов — намеренно отдельный от prompt/chain выше, а не
+        # дополнительное поле в той же структуре. is_quote_grounded() проверяет только
+        # "эта цитата реально есть в контексте дословно" (ловит выдуманные цитаты), но
+        # не проверяет "эта цитата подтверждает именно ЭТОТ claim" — модель может
+        # приложить настоящую, но не по теме цитату к испорченному утверждению (реальный
+        # текст про другой номер/дату), и такое чисто строковая проверка не поймает.
+        # Отдельный узкий вызов на короткие пары (claim, quote) — тот же паттерн, что
+        # использует RAGAS для statement-level entailment, вместо holistic self-report
+        # в одном вызове с генерацией самих claims (что и было исходной проблемой).
+        self.entailment_prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    "Для каждой пронумерованной пары (УТВЕРЖДЕНИЕ, ЦИТАТА) реши: подтверждает ли "
+                    "цитата ИМЕННО это утверждение — дословно и по фактам, а не тематически. "
+                    "Если цитата про ту же сущность, но называет другое число, имя, дату или "
+                    "название — entailed=false. Верни ровно один вердикт на каждую пару, строго "
+                    "в том же порядке, ничего не пропускай.",
+                ),
+                ("human", "{pairs}"),
+            ]
+        )
+
+    async def _check_entailment(self, claims: List["AtomicClaim"], config=None) -> list[bool]:
+        """Возвращает по одному bool на claim (в том же порядке): entailed ли цитата этому
+        claim'у. Fail-safe при любой проблеме (ошибка вызова, несовпадение числа вердиктов
+        с числом claims) — считаем НЕ entailed, а не доверяем на слово: для guardrail'а
+        безопаснее лишний раз отказать, чем пропустить неподтверждённый факт."""
+        if not claims:
+            return []
+        pairs_text = "\n\n".join(
+            f"{i + 1}. УТВЕРЖДЕНИЕ: {c.claim}\nЦИТАТА: {c.supporting_quote}"
+            for i, c in enumerate(claims)
+        )
+        try:
+            structured = self.llm.with_structured_output(EntailmentCheck)
+            chain = self.entailment_prompt | structured
+            result: EntailmentCheck = await chain.ainvoke({"pairs": pairs_text}, config=config)
+        except Exception as e:
+            logger.warning("entailment check failed: %s", e)
+            return [False] * len(claims)
+
+        if len(result.verdicts) != len(claims):
+            logger.warning(
+                "entailment check returned %d verdicts for %d claims", len(result.verdicts), len(claims)
+            )
+            return [False] * len(claims)
+        return [v.entailed for v in result.verdicts]
 
     def should_verify(
         self,
@@ -286,13 +358,25 @@ class AnswerFaithfulnessGuard:
                 "reason": "verifier_error",
             }
 
-        # Грунтованность каждого claim — не по самооценке модели, а по сверке
-        # supporting_quote с реальным контекстом (is_quote_grounded). Опечатки/
-        # варианты написания сущности прощаем отдельно, на тексте самого claim.
+        # Два независимых слоя, оба должны пройти, иначе claim unsupported:
+        # 1) is_quote_grounded (дёшево, без LLM) — цитата реально есть в контексте
+        #    дословно, ловит выдуманные цитаты.
+        # 2) _check_entailment (второй LLM-вызов, только для claims, прошедших слой 1 —
+        #    не тратим его на уже сфабрикованные цитаты) — цитата подтверждает ИМЕННО
+        #    этот claim, а не просто существует где-то в контексте. Ловит случай, когда
+        #    модель прикладывает настоящую, но не по теме цитату к испорченному факту
+        #    (например, реальная цитата про другой номер легиона) — чисто строковая
+        #    проверка слоя 1 такое пропускает, потому что не смотрит на текст claim'а.
+        # Опечатки/варианты написания сущности прощаем отдельно, на тексте самого claim.
+        quote_ok = [is_quote_grounded(c.supporting_quote, context) for c in verdict.claims]
+        to_check = [c for c, ok in zip(verdict.claims, quote_ok) if ok]
+        entailment_results = iter(await self._check_entailment(to_check, config=config))
+        entailed = [next(entailment_results) if ok else False for ok in quote_ok]
+
         unsupported = [
             c.claim
-            for c in verdict.claims
-            if not is_quote_grounded(c.supporting_quote, context)
+            for c, ok, ent in zip(verdict.claims, quote_ok, entailed)
+            if not (ok and ent)
             and not is_spelling_variant_in_context(c.claim, context)
         ]
 

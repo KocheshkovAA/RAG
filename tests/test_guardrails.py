@@ -1,14 +1,39 @@
 """Unit-тесты guardrails — без LLM/Docker, гоняются за секунды."""
 
 from langchain_core.documents import Document
+from langchain_core.runnables import RunnableLambda
 
 from app.core.guardrails import (
     RetrievalGate,
     AnswerFaithfulnessGuard,
+    AtomicClaim,
+    ClaimEntailment,
+    EntailmentCheck,
+    FaithfulnessVerdict,
     doc_relevance_score,
     is_spelling_variant_in_context,
     is_quote_grounded,
 )
+
+
+class _FakeStructuredLLM:
+    """Подменяет AnswerFaithfulnessGuard.llm — .with_structured_output(schema) возвращает
+    заранее заданный ответ для этой схемы, без сети. Guard делает ДВА разных структурированных
+    вызова (FaithfulnessVerdict, потом EntailmentCheck) на одном self.llm — фейк различает их
+    по запрошенной схеме, а не просто отдаёт один и тот же ответ на любой вызов."""
+
+    def __init__(self, responses: dict):
+        self._responses = responses
+        self.calls: list = []
+
+    def with_structured_output(self, schema):
+        response = self._responses[schema]
+
+        async def _fn(prompt_value):
+            self.calls.append((schema, prompt_value))
+            return response
+
+        return RunnableLambda(_fn)
 
 
 def _doc(score: float, *, rerank: bool = True) -> Document:
@@ -208,3 +233,143 @@ def test_quote_grounded_verbatim_quote_in_real_long_context():
 def test_quote_grounded_rejects_fabricated_quote_in_real_long_context():
     fabricated = "Вилиар Ифисс — примарх Тысячи Сынов и мастер тайных искусств Тизариума."
     assert is_quote_grounded(fabricated, _REAL_LONG_CONTEXT) is False
+
+
+def test_structured_output_schemas_have_class_docstrings():
+    """Регресс: GigaChat отдаёт 'Incorrect function or tool description. Description is
+    required' на with_structured_output(), если у pydantic-схемы нет docstring'а (он
+    становится description в JSON-схеме тула) — поймано на первом же живом вызове с
+    ClaimEntailment/EntailmentCheck, у которых были только Field(description=...) на
+    полях, но не на классе."""
+    for schema in (FaithfulnessVerdict, AtomicClaim, ClaimEntailment, EntailmentCheck):
+        assert schema.__doc__, f"{schema.__name__} needs a class docstring (GigaChat schema description)"
+
+
+# --------------------------------------------------------------------------- _check_entailment
+
+
+async def test_check_entailment_empty_list_skips_llm_call():
+    guard = AnswerFaithfulnessGuard(enabled=True)
+    guard.llm = _FakeStructuredLLM({})  # если бы дёрнули LLM, KeyError на пустом dict
+    assert await guard._check_entailment([]) == []
+
+
+async def test_check_entailment_returns_verdicts_in_order():
+    guard = AnswerFaithfulnessGuard(enabled=True)
+    fake_result = EntailmentCheck(verdicts=[ClaimEntailment(entailed=True), ClaimEntailment(entailed=False)])
+    guard.llm = _FakeStructuredLLM({EntailmentCheck: fake_result})
+    claims = [
+        AtomicClaim(claim="a", supporting_quote="qa"),
+        AtomicClaim(claim="b", supporting_quote="qb"),
+    ]
+    assert await guard._check_entailment(claims) == [True, False]
+
+
+async def test_check_entailment_fails_safe_on_verdict_count_mismatch():
+    guard = AnswerFaithfulnessGuard(enabled=True)
+    # Модель вернула вердиктов меньше, чем claims — не доверяем частичному ответу.
+    fake_result = EntailmentCheck(verdicts=[ClaimEntailment(entailed=True)])
+    guard.llm = _FakeStructuredLLM({EntailmentCheck: fake_result})
+    claims = [
+        AtomicClaim(claim="a", supporting_quote="qa"),
+        AtomicClaim(claim="b", supporting_quote="qb"),
+    ]
+    assert await guard._check_entailment(claims) == [False, False]
+
+
+async def test_check_entailment_fails_safe_on_llm_error():
+    class _BrokenLLM:
+        def with_structured_output(self, schema):
+            raise RuntimeError("boom")
+
+    guard = AnswerFaithfulnessGuard(enabled=True)
+    guard.llm = _BrokenLLM()
+    claims = [AtomicClaim(claim="a", supporting_quote="qa")]
+    assert await guard._check_entailment(claims) == [False]
+
+
+# --------------------------------------------------------------------------- verify() integration
+
+
+async def test_verify_rejects_real_but_mismatched_quote():
+    """Регресс-сценарий, ради которого добавлен второй LLM-вызов: цитата дословно
+    существует в контексте (слой 1 проходит), но подтверждает другой номер легиона,
+    чем заявлено в claim'е (слой 2 — entailment — должен это поймать)."""
+    guard = AnswerFaithfulnessGuard(enabled=True, min_score=1.0)
+    doc = Document(
+        page_content="Магнус — примарх XV легиона Тысячи Сынов.",
+        metadata={"rerank_score": 0.9},
+    )
+    verdict = FaithfulnessVerdict(
+        claims=[
+            AtomicClaim(
+                claim="Магнус — примарх XVII легиона",
+                supporting_quote="Магнус — примарх XV легиона Тысячи Сынов.",
+            )
+        ],
+        reasoning="цитата найдена в контексте",
+    )
+    guard.llm = _FakeStructuredLLM(
+        {
+            FaithfulnessVerdict: verdict,
+            EntailmentCheck: EntailmentCheck(verdicts=[ClaimEntailment(entailed=False)]),
+        }
+    )
+
+    passed, _verdict, meta = await guard.verify("вопрос", "ответ", [doc])
+
+    assert passed is False
+    assert meta["unsupported_claims"] == ["Магнус — примарх XVII легиона"]
+
+
+async def test_verify_passes_when_quote_grounded_and_entailed():
+    guard = AnswerFaithfulnessGuard(enabled=True, min_score=1.0)
+    doc = Document(
+        page_content="Магнус — примарх XV легиона Тысячи Сынов.",
+        metadata={"rerank_score": 0.9},
+    )
+    verdict = FaithfulnessVerdict(
+        claims=[
+            AtomicClaim(
+                claim="Магнус — примарх XV легиона",
+                supporting_quote="Магнус — примарх XV легиона Тысячи Сынов.",
+            )
+        ],
+        reasoning="всё сходится",
+    )
+    guard.llm = _FakeStructuredLLM(
+        {
+            FaithfulnessVerdict: verdict,
+            EntailmentCheck: EntailmentCheck(verdicts=[ClaimEntailment(entailed=True)]),
+        }
+    )
+
+    passed, _verdict, meta = await guard.verify("вопрос", "ответ", [doc])
+
+    assert passed is True
+    assert meta["unsupported_claims"] == []
+
+
+async def test_verify_skips_entailment_call_for_claims_with_fabricated_quote():
+    """Оптимизация: если цитата уже не прошла слой 1 (её нет в контексте), entailment
+    на неё не тратится — EntailmentCheck-ответ подгружен только для claim'ов, реально
+    дошедших до слоя 2 (здесь их 0)."""
+    guard = AnswerFaithfulnessGuard(enabled=True, min_score=1.0)
+    doc = Document(page_content="Совсем другой текст ни о чём.", metadata={"rerank_score": 0.9})
+    verdict = FaithfulnessVerdict(
+        claims=[AtomicClaim(claim="Выдуманный факт", supporting_quote="Полностью придуманная цитата")],
+        reasoning="...",
+    )
+    fake_llm = _FakeStructuredLLM(
+        {
+            FaithfulnessVerdict: verdict,
+            EntailmentCheck: EntailmentCheck(verdicts=[]),
+        }
+    )
+    guard.llm = fake_llm
+
+    passed, _verdict, meta = await guard.verify("вопрос", "ответ", [doc])
+
+    assert passed is False
+    assert meta["unsupported_claims"] == ["Выдуманный факт"]
+    assert all(schema is not EntailmentCheck for schema, _ in fake_llm.calls)
