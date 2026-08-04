@@ -201,10 +201,21 @@ evidence/latency/confidence, выбор лучшей ветки — целена
 рано или поздно сама решает остановиться (`model_stopped`) либо упирается в `max_iterations`, но нет
 явного счётчика "N раундов подряд без прогресса" как принудительного условия.
 
+## 7. Framework-less mini-agent (спайк)
+
+`examples/minimal_agent_loop.py` — тот же набор компонентов (state, tool registry, planner/router,
+executor, ReAct-цикл, reflection/retry, stop conditions), но написанный вручную, без LangGraph/
+`bind_tools`/AgentExecutor: LLM отдаёт сырой текст, JSON-решение парсится и валидируется руками
+(`_parse_decision`), reflection — эвристика на пересечении слов ответа и наблюдений, а не LLM-вызов.
+Игрушечные инструменты (калькулятор, статичный справочник), без Qdrant/сети — юнит-тесты
+(`tests/test_minimal_agent_loop.py`) гоняются за миллисекунды. Цель — не заменить `AgenticRAG`, а
+доказать, что LangChain/`bind_tools` в проде — осознанный выбор (готовая сериализация tool-calling,
+меньше ручного парсинга), а не то, что скрывает непонимание, как это устроено внутри.
+
 ---
 
 *Связанные, ещё не написанные документы (см. `projects/warhammerwikibot.md` в личных заметках):
 `docs/agent-design-decisions.md` (agent vs tool vs sub-agent vs deterministic code),
 security/threat-model страница, `docs/prompt-regression.md`, `docs/rnd-decision-log.md`,
-`docs/agent-framework-comparison.md`. Этот документ описывает только state/control-flow/reasoning
-modes/tools/guards/stop-conditions — п.1 плана.*
+`docs/agent-framework-comparison.md`. Этот документ описывает state/control-flow/reasoning
+modes/tools/guards/stop-conditions/framework-less-спайк — пп. 1 и 2 плана.*
