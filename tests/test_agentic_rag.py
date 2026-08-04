@@ -119,16 +119,16 @@ class _FakeToolLLM:
         return self.turns.pop(0)
 
 
-def _ai_tool_call(query: str, call_id: str = "call_1") -> AIMessage:
+def _ai_tool_call(query: str, call_id: str = "call_1", thought: str = "") -> AIMessage:
     return AIMessage(
-        content="",
+        content=thought,
         tool_calls=[{"name": "SearchKnowledgeBase", "args": {"query": query}, "id": call_id, "type": "tool_call"}],
     )
 
 
-def _ai_tool_calls(*queries_and_ids: tuple[str, str]) -> AIMessage:
+def _ai_tool_calls(*queries_and_ids: tuple[str, str], thought: str = "") -> AIMessage:
     return AIMessage(
-        content="",
+        content=thought,
         tool_calls=[
             {"name": "SearchKnowledgeBase", "args": {"query": q}, "id": cid, "type": "tool_call"}
             for q, cid in queries_and_ids
@@ -237,6 +237,37 @@ async def test_agentic_runs_parallel_tool_calls_in_one_round():
     second_call_messages = fake_llm.calls[1]
     tool_messages = [m for m in second_call_messages if isinstance(m, ToolMessage)]
     assert {m.tool_call_id for m in tool_messages} == {"call_1", "call_2"}
+
+
+async def test_agentic_captures_thought_per_round():
+    question = "Кто такие некроны?"
+    retriever = _FakeRetriever({question: [_doc(0.82)]})
+    agentic = _make_agentic(retriever)
+    agentic.llm_with_tools = _FakeToolLLM([
+        _ai_tool_call(question, thought="Ищу базовую информацию о некронах."),
+        _ai_stop("Данных достаточно, гейт пройден, останавливаюсь."),
+    ])
+
+    result = await agentic.answer(question)
+
+    assert result["agentic"]["thoughts"] == [
+        {"round": 1, "thought": "Ищу базовую информацию о некронах."},
+        {"round": 2, "thought": "Данных достаточно, гейт пройден, останавливаюсь."},
+    ]
+
+
+async def test_agentic_skips_empty_thoughts():
+    question = "Кто такие некроны?"
+    retriever = _FakeRetriever({question: [_doc(0.82)]})
+    agentic = _make_agentic(retriever)
+    # Модель не всегда обязана прислать мысль (например, реальный провайдер
+    # иногда шлёт пустой content вместе с tool_calls) — пустые ходы не должны
+    # засорять thoughts фиктивными записями.
+    agentic.llm_with_tools = _FakeToolLLM([_ai_tool_call(question), _ai_stop("")])
+
+    result = await agentic.answer(question)
+
+    assert result["agentic"]["thoughts"] == []
 
 
 def test_agentic_reuses_gate_and_guard_by_reference():
