@@ -77,12 +77,20 @@ def is_quote_grounded(quote: str, context: str, min_coverage: float = 0.85) -> b
     Модель иногда самооценивает is_grounded=true для ответа, где сущность упомянута
     в контексте, но конкретный атрибут (номер легиона, дата, число) подменён — сверка
     цитаты against контекста, а не доверие вердикту модели, ловит именно такие случаи.
+
+    autojunk=False обязателен: реальный context — это тысячи символов конкатенированных
+    чанков, и при len(context) >= 200 SequenceMatcher по умолчанию включает эвристику
+    "популярные символы — мусор", которая на практике режет find_longest_match до ~70%
+    даже для цитаты, дословно и полностью содержащейся в контексте (воспроизведено на
+    реальном примере: 317-символьная verbatim-цитата давала match.size=222 с autojunk=True
+    и 317 — с autojunk=False). Без этой опции гейт ложно отклонял корректно заземлённые
+    ответы почти на каждом сколько-нибудь длинном контексте.
     """
     quote_norm = _normalize_for_match(quote)
     if len(quote_norm) < 4:
         return False
     context_norm = _normalize_for_match(context)
-    match = difflib.SequenceMatcher(None, quote_norm, context_norm).find_longest_match(
+    match = difflib.SequenceMatcher(None, quote_norm, context_norm, autojunk=False).find_longest_match(
         0, len(quote_norm), 0, len(context_norm)
     )
     return match.size >= min_coverage * len(quote_norm)
