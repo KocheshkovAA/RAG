@@ -1,14 +1,15 @@
 """Unit-тесты AgenticRAG — без LLM/Docker, гоняются за секунды.
 
-Реальный LLM-клиент (self.llm/self.reformulator в __init__) конструируется
+Реальный LLM-клиент (self.llm/self.llm_with_tools в __init__) конструируется
 как обычно (это не бьёт по сети — то же самое уже происходит в
 AnswerFaithfulnessGuard() в test_guardrails.py), но всё, что реально
-вызывает LLM/сеть в ходе теста (reformulator.process, faithfulness_guard.verify,
+вызывает LLM/сеть в ходе теста (llm_with_tools.ainvoke, faithfulness_guard.verify,
 retriever, reranker), подменяется фейками/моками.
 """
 
 import pytest
 from langchain_core.documents import Document
+from langchain_core.messages import AIMessage, ToolMessage
 
 import app.core.agentic_rag as agentic_rag_module
 from app.core.agentic_rag import AgenticRAG
@@ -106,14 +107,37 @@ class _FakeSourceExtractor:
         return [{"article_name": d.metadata.get("article_name")} for d in docs]
 
 
-class _FakeReformulator:
-    def __init__(self, responses: list[str | None]):
-        self.responses = list(responses)
-        self.calls: list[tuple] = []
+class _FakeToolLLM:
+    """Скриптует последовательность ходов модели; ainvoke() отдаёт по одному AIMessage за раз."""
 
-    async def process(self, question, previous_query, gate_meta, config=None):
-        self.calls.append((question, previous_query))
-        return self.responses.pop(0) if self.responses else None
+    def __init__(self, turns: list[AIMessage]):
+        self.turns = list(turns)
+        self.calls: list[list] = []  # история сообщений на каждый вызов — для проверки ToolMessage
+
+    async def ainvoke(self, messages, config=None):
+        self.calls.append(list(messages))
+        return self.turns.pop(0)
+
+
+def _ai_tool_call(query: str, call_id: str = "call_1") -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[{"name": "SearchKnowledgeBase", "args": {"query": query}, "id": call_id, "type": "tool_call"}],
+    )
+
+
+def _ai_tool_calls(*queries_and_ids: tuple[str, str]) -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "SearchKnowledgeBase", "args": {"query": q}, "id": cid, "type": "tool_call"}
+            for q, cid in queries_and_ids
+        ],
+    )
+
+
+def _ai_stop(text: str = "Готово") -> AIMessage:
+    return AIMessage(content=text, tool_calls=[])
 
 
 class _FakeVectorRAG:
@@ -134,53 +158,85 @@ def _make_agentic(retriever) -> AgenticRAG:
         source_extractor=_FakeSourceExtractor(),
     )
     agentic = AgenticRAG(fake_rag)
-    # Реальный QueryReformulator бьёт по сети — подменяем на фейк в каждом тесте отдельно.
+    # Реальный self.llm_with_tools бьёт по сети — подменяем на фейк в каждом тесте отдельно.
     return agentic
 
 
-async def test_agentic_stops_immediately_when_gate_passes():
+async def test_agentic_stops_after_model_confirms_enough_context():
     question = "Кто такие некроны?"
     retriever = _FakeRetriever({question: [_doc(0.82)]})
     agentic = _make_agentic(retriever)
-    agentic.reformulator = _FakeReformulator([])  # не должен вызываться
+    # Гейт проходит уже на первом раунде, но модель всё равно получает следующий
+    # ход и там сама решает остановиться (без вызова инструмента) — раннего
+    # выхода по "гейт прошёл" больше нет, решение всегда за моделью.
+    agentic.llm_with_tools = _FakeToolLLM([_ai_tool_call(question), _ai_stop()])
 
     result = await agentic.answer(question)
 
     assert result["guardrail"]["refused"] is False
-    assert result["agentic"]["stopped_reason"] == "gate_passed"
-    assert result["agentic"]["iterations"] == 1
+    assert result["agentic"]["stopped_reason"] == "model_stopped"
+    assert result["agentic"]["iterations"] == 2
     assert result["answer"] == "FAKE ANSWER"
     assert len(retriever.calls) == 1
 
 
-async def test_agentic_reformulates_then_stops_at_max_iterations():
+async def test_agentic_keeps_calling_tool_until_max_iterations():
     question = "Кто такой Ярик?"
     # Ни один вариант запроса никогда не находит документов с достаточным score.
     retriever = _FakeRetriever({question: [_doc(0.1)]})
     agentic = _make_agentic(retriever)
     agentic.max_iterations = 3
-    agentic.reformulator = _FakeReformulator(["запрос 2", "запрос 3"])
+    agentic.llm_with_tools = _FakeToolLLM(
+        [_ai_tool_call(question), _ai_tool_call("запрос 2"), _ai_tool_call("запрос 3")]
+    )
 
     result = await agentic.answer(question)
 
     assert result["guardrail"]["refused"] is True
     assert result["agentic"]["stopped_reason"] == "max_iterations"
     assert result["agentic"]["iterations"] == 3
-    assert result["agentic"]["queries_tried"] == [question, "запрос 2", "запрос 3"]
+    assert [tc["query"] for tc in result["agentic"]["tool_calls_made"]] == [question, "запрос 2", "запрос 3"]
 
 
-async def test_agentic_stops_when_reformulator_gives_nothing_new():
+async def test_agentic_refuses_when_model_never_searches():
     question = "Офф-топик вопрос"
-    retriever = _FakeRetriever({question: [_doc(0.1)]})
+    retriever = _FakeRetriever({})
     agentic = _make_agentic(retriever)
     agentic.max_iterations = 3
-    agentic.reformulator = _FakeReformulator([None])
+    agentic.llm_with_tools = _FakeToolLLM([_ai_stop()])
 
     result = await agentic.answer(question)
 
     assert result["guardrail"]["refused"] is True
-    assert result["agentic"]["stopped_reason"] == "no_new_query"
+    assert result["agentic"]["stopped_reason"] == "model_stopped"
     assert result["agentic"]["iterations"] == 1
+    assert result["guardrail"]["retrieval_gate"]["reason"] == "no_search_attempted"
+    assert len(retriever.calls) == 0
+
+
+async def test_agentic_runs_parallel_tool_calls_in_one_round():
+    question = "Кто такие Магнус и Ангрон?"
+    retriever = _FakeRetriever({
+        "Магнус Красный": [_doc(0.9, content="magnus")],
+        "Ангрон": [_doc(0.9, content="angron")],
+    })
+    agentic = _make_agentic(retriever)
+    fake_llm = _FakeToolLLM([
+        _ai_tool_calls(("Магнус Красный", "call_1"), ("Ангрон", "call_2")),
+        _ai_stop(),
+    ])
+    agentic.llm_with_tools = fake_llm
+
+    result = await agentic.answer(question)
+
+    assert sorted(retriever.calls) == ["Ангрон", "Магнус Красный"]
+    assert result["agentic"]["iterations"] == 2
+    assert len(result["agentic"]["tool_calls_made"]) == 2
+
+    # Второй вызов ainvoke должен содержать по ToolMessage на каждый tool_call_id.
+    second_call_messages = fake_llm.calls[1]
+    tool_messages = [m for m in second_call_messages if isinstance(m, ToolMessage)]
+    assert {m.tool_call_id for m in tool_messages} == {"call_1", "call_2"}
 
 
 def test_agentic_reuses_gate_and_guard_by_reference():

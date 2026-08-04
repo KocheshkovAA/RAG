@@ -1,12 +1,9 @@
-import json
 from typing import List
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from langfuse import observe
 from pydantic import BaseModel, Field
 
-from typing import List
-from pydantic import BaseModel, Field
 
 class ExpandedQuery(BaseModel):
     """Список поисковых запросов для улучшения ретрива в Warhammer 40k Wiki."""
@@ -40,54 +37,3 @@ class QueryOptimizer:
             # Если даже структурированный вывод подвел (редко, но бывает)
             print(f"Query optimization failed: {e}")
             return [question]
-
-
-class ReformulatedQuery(BaseModel):
-    """Единичный переформулированный запрос для retry-цикла ретрива."""
-    query: str = Field(description="Переформулированный поисковый запрос")
-    reasoning: str = Field(description="Кратко: почему предыдущий запрос не дал релевантных результатов")
-
-
-class QueryReformulator:
-    """Переформулирует запрос по фидбеку о неудаче ретрива (не путать с QueryOptimizer —
-    тот делает expansion на 1-3 параллельных под-запроса без обратной связи)."""
-
-    def __init__(self, llm):
-        self.structured_llm = llm.with_structured_output(ReformulatedQuery)
-
-        self.prompt = ChatPromptTemplate.from_messages([
-            ("system", (
-                "Твоя задача — переформулировать поисковый запрос, который не нашёл "
-                "достаточно релевантных документов в базе знаний по Warhammer 40k.\n"
-                "Тебе известен исходный вопрос пользователя, последний поисковый запрос "
-                "и оценка релевантности найденных документов (чем ниже — тем хуже).\n"
-                "Предложи ОДИН новый вариант запроса: другие ключевые слова, синоним "
-                "имени/термина, более широкая или более узкая формулировка — в зависимости "
-                "от того, что вероятнее сработает."
-            )),
-            ("human", (
-                "Исходный вопрос: {question}\n"
-                "Предыдущий запрос: {previous_query}\n"
-                "Максимальный скор найденных документов: {max_score} (нужно >= {min_score})\n"
-            )),
-        ])
-
-        self.chain = self.prompt | self.structured_llm
-
-    @observe(name="Query Reformulation")
-    async def process(self, question: str, previous_query: str, gate_meta: dict, config=None) -> str | None:
-        try:
-            result: ReformulatedQuery = await self.chain.ainvoke(
-                {
-                    "question": question,
-                    "previous_query": previous_query,
-                    "max_score": gate_meta.get("max_score"),
-                    "min_score": gate_meta.get("min_score"),
-                },
-                config=config,
-            )
-            reformulated = (result.query or "").strip()
-            return reformulated or None
-        except Exception as e:
-            print(f"Query reformulation failed: {e}")
-            return None

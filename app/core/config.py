@@ -120,10 +120,14 @@ class Settings(BaseSettings):
     # --- AGENTIC ROUTE ---
     # По умолчанию выключено: роутер сам не выбирает agentic, пока не включим явно.
     AGENTIC_ROUTE_ENABLED: bool = Field(default=False)
-    # Сколько раз можно переформулировать запрос и повторить ретрив, прежде чем
-    # сдаться. Условие остановки — тот же RetrievalGate, что у vector-маршрута
-    # (не отдельный порог, чтобы не разъезжались калибровки).
+    # Сколько раундов tool-calling разрешено модели (search_knowledge_base),
+    # прежде чем принудительно остановить цикл независимо от того, что хочет
+    # модель. Условие остановки в рамках раунда — тот же RetrievalGate, что у
+    # vector-маршрута (не отдельный порог, чтобы не разъезжались калибровки).
     AGENTIC_MAX_ITERATIONS: int = Field(default=3)
+    # Потолок параллельных вызовов search_knowledge_base за один ход модели —
+    # защита от патологического "вызвать инструмент 20 раз за раз".
+    AGENTIC_MAX_TOOL_CALLS_PER_ROUND: int = Field(default=4)
 
     PERSONA_LLM_PROVIDER: str = Field(default="")
     PERSONA_LLM_MODEL: str = Field(default="")
