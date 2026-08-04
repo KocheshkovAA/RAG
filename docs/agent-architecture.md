@@ -166,8 +166,9 @@ evidence/latency/confidence, выбор лучшей ветки — целена
 | `warhammer_service_status` (MCP tool) | `mcp_server/server.py` | health-check `/v1/ready`, не проходит через агентный цикл |
 
 Все read-only. Ни один инструмент не имеет write-доступа к внешнему состоянию (нет tool'ов, которые
-что-то изменяют — только читают Qdrant/LightRAG/HTTP-статус). Это прямо ограничивает threat model
-(см. [раздел про security в плане проекта], пока не задокументирован отдельным файлом).
+что-то изменяют — только читают Qdrant/LightRAG/HTTP-статус). Это прямо ограничивает threat model —
+полный разбор (prompt injection, tool misuse, зацикливание, hallucinated action, context poisoning,
+избыточные MCP-права) см. [docs/agent-threat-model.md](agent-threat-model.md).
 
 ## 5. Guards
 
@@ -224,8 +225,9 @@ executor, ReAct-цикл, reflection/retry, stop conditions), но написа�
 
 ---
 
-*Связанные, ещё не написанные документы (см. `projects/warhammerwikibot.md` в личных заметках):
+*Связанные документы: [docs/agent-threat-model.md](agent-threat-model.md) — security/failure modes
+(п.4 плана, готово). Ещё не написаны (см. `projects/warhammerwikibot.md` в личных заметках):
 `docs/agent-design-decisions.md` (agent vs tool vs sub-agent vs deterministic code),
-security/threat-model страница, `docs/prompt-regression.md`, `docs/rnd-decision-log.md`,
-`docs/agent-framework-comparison.md`. Этот документ описывает state/control-flow/reasoning
-modes/tools/guards/stop-conditions/framework-less-спайк — пп. 1 и 2 плана.*
+`docs/prompt-regression.md`, `docs/rnd-decision-log.md`, `docs/agent-framework-comparison.md`.
+Этот документ описывает state/control-flow/reasoning modes/tools/guards/stop-conditions/
+framework-less-спайк — пп. 1 и 2 плана.*
