@@ -60,8 +60,12 @@ services:
   # Второй TEI на дообученном biencoder-чекпоинте (training/biencoder_output/final),
   # для честного IR-eval дообученных эмбеддингов без трогания прод-коллекции
   # warhammer_wiki (см. app/eval/compare_configs.py, сценарий finetuned-embeddings).
-  # Не входит в core-стек make up — поднимается отдельно: docker compose up -d tei-finetuned.
+  # Не входит в core-стек make up — раньше это держалось на честном слове в комментарии,
+  # из-за чего make up реально поднимал его вместе с tei/vllm-reranker/vllm-llm и все
+  # разом лезли на одну GPU (count: 1), подвешивая машину. Теперь явный profile:
+  # docker compose --profile tei-finetuned up -d tei-finetuned.
   tei-finetuned:
+      profiles: ["tei-finetuned"]
       # GPU здесь не работает и упирается в тупик версий, не просто в конфиг:
       # :latest/:86-latest бандлят cuda-compat (forward-compat shim), который
       # NVIDIA не поддерживает на GeForce (только datacenter-карты) — падает
@@ -163,9 +167,11 @@ services:
 
   # Self-hosted генерация через vLLM — учебный эксперимент (training/vllm_inference_deepdive.ipynb),
   # закрывает рыночный гэп из learning_goals.md (vLLM/квантизация встретились в 3 вакансиях).
-  # НЕ входит в core-стек make up, модель НЕ скачана по умолчанию — поднимать явно:
-  #   docker compose stop vllm-reranker   # 6GB VRAM на карте, обе модели разом не влезут
-  #   docker compose up -d vllm-llm       # первый запуск скачает веса с HuggingFace
+  # НЕ входит в core-стек make up (раньше не было закреплено profile'ем, и make up
+  # реально поднимал его вместе с tei/tei-finetuned/vllm-reranker на одну GPU —
+  # отсюда зависания при старте). Модель НЕ скачана по умолчанию — поднимать явно:
+  #   docker compose stop vllm-reranker                        # 6GB VRAM на карте, обе модели разом не влезут
+  #   docker compose --profile llm up -d vllm-llm               # первый запуск скачает веса с HuggingFace
   # Версия образа и env — те же грабли, что уже нашли на vllm-reranker (см. его комментарии выше):
   # :latest уезжает на несовместимую с драйвером хоста CUDA, spawn обязателен для CUDA_VISIBLE_DEVICES.
   # max-model-len 3072, gpu-memory-utilization 0.68 (26.07, пересчитано под реальные данные):
@@ -179,6 +185,7 @@ services:
   vllm-llm:
       image: vllm/vllm-openai:v0.19.1
       container_name: vllm-llm
+      profiles: ["llm"]
       environment:
         - CUDA_VISIBLE_DEVICES=0
         - LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu
@@ -214,10 +221,11 @@ services:
   # (см. комментарий tei-finetuned выше — cuda-compat shim не поддерживается на GeForce).
   # vLLM --runner pooling — тот же трюк, что уже используется для vllm-reranker, но для
   # чистого эмбеддинг-чекпоинта (Qwen3Model, training/biencoder_output/final). НЕ входит
-  # в core-стек — поднимать явно: docker compose up -d vllm-biencoder.
+  # в core-стек — поднимать явно: docker compose --profile biencoder up -d vllm-biencoder.
   vllm-biencoder:
       image: vllm/vllm-openai:v0.19.1
       container_name: vllm-biencoder
+      profiles: ["biencoder"]
       environment:
         - CUDA_VISIBLE_DEVICES=0
         - LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu
