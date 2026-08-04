@@ -37,8 +37,14 @@ class Settings(BaseSettings):
     RETRIEVAL_MIN_SCORE_NO_RERANK: float = Field(default=0.2)
     FAITHFULNESS_CHECK_ENABLED: bool = Field(default=True)
     FAITHFULNESS_MIN_SCORE: float = Field(default=0.7)
-    # Серая зона 0.55–0.80: генерация + LLM-верификация; выше 0.80 — можно пропустить verify
-    FAITHFULNESS_SKIP_ABOVE: float = Field(default=0.80)
+    # Серая зона 0.55–0.72: генерация + LLM-верификация; выше 0.72 — можно пропустить verify.
+    # Было 0.80 — живой замер retrieval_gate.max_score по всем 60 вопросам eval-датасета
+    # показал диапазон 0.634–0.731: reranker (bge-reranker-v2-m3) на этом корпусе физически
+    # никогда не выдаёт >= 0.80, из-за чего этот skip ни разу не срабатывал и faithfulness
+    # проверялась на 100% ответов — даже на самых чистых, однозначных совпадениях. 0.72
+    # подобран чуть ниже реального потолка (0.731), чтобы skip реально включался для чистых
+    # вопросов, но пограничные (0.63-0.72) по-прежнему проходили полную проверку.
+    FAITHFULNESS_SKIP_ABOVE: float = Field(default=0.72)
     # Сколько раз независимо повторить извлечение claims+грунтовку на ОДНОМ и том же
     # (question, answer, context) и усреднить faithfulness_score — self-consistency против
     # шума самого верификатора. Живой замер (docs/prompt-regression.md): на фиксированном
