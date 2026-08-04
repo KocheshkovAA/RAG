@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     RATE_LIMIT_ENABLED: bool = Field(default=True)
     # Формат slowapi: "<число>/<second|minute|hour|day>"
     RATE_LIMIT_ASK: str = Field(default="20/minute")
+    # /debate дороже /ask (несколько персон = несколько LLM-вызовов на один HTTP-запрос),
+    # поэтому лимит ниже, а не переиспользует RATE_LIMIT_ASK.
+    RATE_LIMIT_DEBATE: str = Field(default="5/minute")
 
     # --- CACHE / RESILIENCE ---
     CACHE_ENABLED: bool = Field(default=True)

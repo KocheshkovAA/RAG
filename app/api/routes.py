@@ -93,10 +93,17 @@ class DebateRequest(BaseModel):
 
 
 @router.post("/debate")
-async def debate(request: DebateRequest):
+@limiter.limit(settings.RATE_LIMIT_DEBATE)
+async def debate(request: Request, payload: DebateRequest):
     """Стримящий NDJSON-эндпоинт (не обычный JSON, как /ask) — каждая строка
     ответа это отдельное событие {"type": "turn"|"refused"|"done", ...},
-    персонажи отправляются по мере готовности, а не все разом в конце."""
+    персонажи отправляются по мере готовности, а не все разом в конце.
+
+    Своя (более низкая) ставка лимита, а не переиспользование RATE_LIMIT_ASK: до этого
+    фикса эндпоинт был вообще без лимита (@limiter.limit требует объект Request, которого
+    в сигнатуре не было — только тело запроса под тем же именем 'request'), хотя один
+    вызов /debate дороже /ask (несколько персон = несколько LLM-вызовов за один HTTP-запрос).
+    """
     if not settings.PERSONA_DEBATE_ENABLED:
         raise HTTPException(
             status_code=503,
@@ -105,7 +112,7 @@ async def debate(request: DebateRequest):
 
     async def event_stream():
         try:
-            async for event in persona_debate.stream(request.question):
+            async for event in persona_debate.stream(payload.question):
                 yield json.dumps(event, ensure_ascii=False) + "\n"
         except Exception as e:
             logger.exception("Debate failed")
