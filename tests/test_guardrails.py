@@ -461,3 +461,76 @@ async def test_verify_averages_score_across_consistency_samples():
     assert meta["sample_scores"] == [0.5, 1.0]
     assert meta["faithfulness_score"] == 0.75
     assert passed is True  # 0.75 >= 0.6
+
+
+# --------------------------------------------------------------------------- require_verbatim_quote=False (graph)
+
+
+async def test_check_context_entailment_empty_list_skips_llm_call():
+    guard = AnswerFaithfulnessGuard(enabled=True, require_verbatim_quote=False)
+    guard.llm = _FakeStructuredLLM({})  # если бы дёрнули LLM, KeyError на пустом dict
+    assert await guard._check_context_entailment([], "контекст") == []
+
+
+async def test_check_context_entailment_returns_verdicts_in_order():
+    guard = AnswerFaithfulnessGuard(enabled=True, require_verbatim_quote=False)
+    fake_result = EntailmentCheck(verdicts=[ClaimEntailment(entailed=True), ClaimEntailment(entailed=False)])
+    guard.llm = _FakeStructuredLLM({EntailmentCheck: fake_result})
+    claims = [
+        AtomicClaim(claim="a", supporting_quote=""),
+        AtomicClaim(claim="b", supporting_quote=""),
+    ]
+    assert await guard._check_context_entailment(claims, "контекст") == [True, False]
+
+
+async def test_verify_non_strict_passes_synthesized_claim_without_verbatim_quote():
+    """Регресс-сценарий п.'б' (docs/rnd-decision-log.md): graph-ответ синтезирует вывод
+    из нескольких связей графа — у него нет одной непрерывной дословной цитаты, даже
+    когда факт верный. require_verbatim_quote=True отклонил бы это (is_quote_grounded
+    не найдёт цитату целиком в контексте); require_verbatim_quote=False должен пройти,
+    раз context-entailment подтверждает claim по смыслу."""
+    guard = AnswerFaithfulnessGuard(enabled=True, min_score=1.0, require_verbatim_quote=False)
+    doc = Document(
+        page_content="Магнус — примарх Тысячи Сынов. Тысяча Сынов специализируется на психических искусствах.",
+        metadata={"rerank_score": 0.9},
+    )
+    verdict = FaithfulnessVerdict(
+        claims=[
+            AtomicClaim(
+                claim="Магнус возглавляет легион психиков",
+                supporting_quote="синтез двух разных предложений, не дословная цитата целиком",
+            )
+        ],
+        reasoning="синтез из двух фактов контекста",
+    )
+    guard.llm = _FakeStructuredLLM(
+        {
+            FaithfulnessVerdict: verdict,
+            EntailmentCheck: EntailmentCheck(verdicts=[ClaimEntailment(entailed=True)]),
+        }
+    )
+
+    passed, _verdict, meta = await guard.verify("вопрос", "ответ", [doc])
+
+    assert passed is True
+    assert meta["unsupported_claims"] == []
+
+
+async def test_verify_non_strict_still_rejects_unentailed_claim():
+    guard = AnswerFaithfulnessGuard(enabled=True, min_score=1.0, require_verbatim_quote=False)
+    doc = Document(page_content="Магнус — примарх Тысячи Сынов.", metadata={"rerank_score": 0.9})
+    verdict = FaithfulnessVerdict(
+        claims=[AtomicClaim(claim="Магнус — бог хаоса", supporting_quote="")],
+        reasoning="...",
+    )
+    guard.llm = _FakeStructuredLLM(
+        {
+            FaithfulnessVerdict: verdict,
+            EntailmentCheck: EntailmentCheck(verdicts=[ClaimEntailment(entailed=False)]),
+        }
+    )
+
+    passed, _verdict, meta = await guard.verify("вопрос", "ответ", [doc])
+
+    assert passed is False
+    assert meta["unsupported_claims"] == ["Магнус — бог хаоса"]

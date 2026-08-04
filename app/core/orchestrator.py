@@ -111,7 +111,15 @@ class WarhammerOrchestrator:
         self.agentic_rag = agentic_rag
         self.llm = llm_factory.get_llm(temperature=0, role="router")
         self.retrieval_gate = RetrievalGate()
-        self.faithfulness_guard = AnswerFaithfulnessGuard()
+        # require_verbatim_quote=False: этот guard используется только для graph-маршрута
+        # (см. _answer_graph ниже) — у vector/agentic свой собственный guard в RAG с
+        # require_verbatim_quote=True (по умолчанию). Live-прогон на реальном Horus Heresy
+        # датасете показал 100% refusal_rate на graph под дословной проверкой: у graph
+        # обычно один "источник" на весь запрос (вся статья одним файлом), а ответ —
+        # синтез из нескольких связей графа, у которого чаще всего нет одной непрерывной
+        # цитаты-доказательства, даже когда каждый факт в нём реален. См. AnswerFaithfulnessGuard
+        # в guardrails.py и docs/rnd-decision-log.md.
+        self.faithfulness_guard = AnswerFaithfulnessGuard(require_verbatim_quote=False)
 
         agentic_instruction = ""
         if settings.AGENTIC_ROUTE_ENABLED:

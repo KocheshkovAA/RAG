@@ -237,6 +237,7 @@ class AnswerFaithfulnessGuard:
         min_score: Optional[float] = None,
         insufficient_message: Optional[str] = None,
         consistency_samples: Optional[int] = None,
+        require_verbatim_quote: bool = True,
     ):
         self.enabled = (
             enabled if enabled is not None else settings.FAITHFULNESS_CHECK_ENABLED
@@ -251,6 +252,15 @@ class AnswerFaithfulnessGuard:
             if consistency_samples is not None
             else settings.FAITHFULNESS_CONSISTENCY_SAMPLES,
         )
+        # False для graph-маршрута (см. orchestrator.py): live-прогон на реальном
+        # Horus Heresy датасете показал 100% refusal_rate на graph под этой же
+        # дословной проверкой, откалиброванной под vector (плоские чанки). У graph
+        # на весь запрос обычно один "источник" (вся статья одним файлом), а ответ —
+        # синтез из нескольких связей графа; корректный multi-hop вывод почти никогда
+        # не существует как одна непрерывная дословная цитата, даже когда каждый
+        # отдельный факт в нём реален. Требовать дословную цитату там наказывает
+        # синтез за то, что это синтез, а не за то, что он неверный (docs/rnd-decision-log.md).
+        self.require_verbatim_quote = require_verbatim_quote
         self.insufficient_message = (
             insufficient_message or settings.INSUFFICIENT_INFO_MESSAGE
         )
@@ -305,6 +315,27 @@ class AnswerFaithfulnessGuard:
                 ("human", "{pairs}"),
             ]
         )
+        # Вариант entailment-проверки БЕЗ требования дословной цитаты — для
+        # require_verbatim_quote=False (graph-маршрут). Сравнивает claim не с конкретной
+        # цитатой, а с ВСЕМ контекстом целиком: multi-hop вывод, синтезированный из
+        # нескольких связей графа, может быть верным, даже не будучи одной непрерывной
+        # цитатой — но должен прослеживаться из контекста по смыслу, не быть додумкой
+        # поверх общих знаний о вселенной (см. require_verbatim_quote в __init__).
+        self.context_entailment_prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    "Для каждого пронумерованного УТВЕРЖДЕНИЯ реши: подтверждается ли оно "
+                    "информацией из КОНТЕКСТА — не обязательно одной дословной фразой, "
+                    "допустим синтез из нескольких мест контекста, если каждая часть вывода "
+                    "по отдельности прослеживается в контексте. Если утверждение опирается на "
+                    "общие знания о вселенной, а не на конкретные факты из контекста (даже "
+                    "правдоподобные) — entailed=false. Верни ровно один вердикт на каждое "
+                    "утверждение, строго в том же порядке, ничего не пропускай.",
+                ),
+                ("human", "КОНТЕКСТ:\n{context}\n\nУТВЕРЖДЕНИЯ:\n{claims}"),
+            ]
+        )
 
     async def _check_entailment(self, claims: List["AtomicClaim"], config=None) -> list[bool]:
         """Возвращает по одному bool на claim (в том же порядке): entailed ли цитата этому
@@ -328,6 +359,33 @@ class AnswerFaithfulnessGuard:
         if len(result.verdicts) != len(claims):
             logger.warning(
                 "entailment check returned %d verdicts for %d claims", len(result.verdicts), len(claims)
+            )
+            return [False] * len(claims)
+        return [v.entailed for v in result.verdicts]
+
+    async def _check_context_entailment(
+        self, claims: List["AtomicClaim"], context: str, config=None
+    ) -> list[bool]:
+        """Как _check_entailment, но claim сверяется с целым контекстом, а не с
+        supporting_quote конкретного claim'а — для require_verbatim_quote=False.
+        Тот же fail-safe: любая проблема -> не entailed."""
+        if not claims:
+            return []
+        claims_text = "\n".join(f"{i + 1}. {c.claim}" for i, c in enumerate(claims))
+        try:
+            structured = self.llm.with_structured_output(EntailmentCheck)
+            chain = self.context_entailment_prompt | structured
+            result: EntailmentCheck = await chain.ainvoke(
+                {"context": context, "claims": claims_text}, config=config
+            )
+        except Exception as e:
+            logger.warning("context entailment check failed: %s", e)
+            return [False] * len(claims)
+
+        if len(result.verdicts) != len(claims):
+            logger.warning(
+                "context entailment check returned %d verdicts for %d claims",
+                len(result.verdicts), len(claims),
             )
             return [False] * len(claims)
         return [v.entailed for v in result.verdicts]
@@ -383,25 +441,30 @@ class AnswerFaithfulnessGuard:
             config=config,
         )
 
-        # Два независимых слоя, оба должны пройти, иначе claim unsupported:
-        # 1) is_quote_grounded (дёшево, без LLM) — цитата реально есть в контексте
-        #    дословно, ловит выдуманные цитаты.
-        # 2) _check_entailment (второй LLM-вызов, только для claims, прошедших слой 1 —
-        #    не тратим его на уже сфабрикованные цитаты) — цитата подтверждает ИМЕННО
-        #    этот claim, а не просто существует где-то в контексте. Ловит случай, когда
-        #    модель прикладывает настоящую, но не по теме цитату к испорченному факту
-        #    (например, реальная цитата про другой номер легиона) — чисто строковая
-        #    проверка слоя 1 такое пропускает, потому что не смотрит на текст claim'а.
-        # Опечатки/варианты написания сущности прощаем отдельно, на тексте самого claim.
-        quote_ok = [is_quote_grounded(c.supporting_quote, context) for c in verdict.claims]
-        to_check = [c for c, ok in zip(verdict.claims, quote_ok) if ok]
-        entailment_results = iter(await self._check_entailment(to_check, config=config))
-        entailed = [next(entailment_results) if ok else False for ok in quote_ok]
+        if self.require_verbatim_quote:
+            # Два независимых слоя, оба должны пройти, иначе claim unsupported:
+            # 1) is_quote_grounded (дёшево, без LLM) — цитата реально есть в контексте
+            #    дословно, ловит выдуманные цитаты.
+            # 2) _check_entailment (второй LLM-вызов, только для claims, прошедших слой 1 —
+            #    не тратим его на уже сфабрикованные цитаты) — цитата подтверждает ИМЕННО
+            #    этот claim, а не просто существует где-то в контексте. Ловит случай, когда
+            #    модель прикладывает настоящую, но не по теме цитату к испорченному факту
+            #    (например, реальная цитата про другой номер легиона) — чисто строковая
+            #    проверка слоя 1 такое пропускает, потому что не смотрит на текст claim'а.
+            quote_ok = [is_quote_grounded(c.supporting_quote, context) for c in verdict.claims]
+            to_check = [c for c, ok in zip(verdict.claims, quote_ok) if ok]
+            entailment_results = iter(await self._check_entailment(to_check, config=config))
+            entailed = [next(entailment_results) if ok else False for ok in quote_ok]
+        else:
+            # graph-маршрут: без требования дословной цитаты (см. __init__) — claim
+            # сверяется целиком с контекстом одним batched LLM-вызовом.
+            entailed = await self._check_context_entailment(verdict.claims, context, config=config)
 
+        # Опечатки/варианты написания сущности прощаем отдельно, на тексте самого claim.
         unsupported = [
             c.claim
-            for c, ok, ent in zip(verdict.claims, quote_ok, entailed)
-            if not (ok and ent)
+            for c, ent in zip(verdict.claims, entailed)
+            if not ent
             and not is_spelling_variant_in_context(c.claim, context)
         ]
 
