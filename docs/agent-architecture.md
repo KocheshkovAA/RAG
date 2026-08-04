@@ -226,8 +226,9 @@ executor, ReAct-цикл, reflection/retry, stop conditions), но написа�
 ---
 
 *Связанные документы: [docs/agent-threat-model.md](agent-threat-model.md) — security/failure modes
-(п.4 плана, готово). Ещё не написаны (см. `projects/warhammerwikibot.md` в личных заметках):
-`docs/agent-design-decisions.md` (agent vs tool vs sub-agent vs deterministic code),
-`docs/prompt-regression.md`, `docs/rnd-decision-log.md`, `docs/agent-framework-comparison.md`.
-Этот документ описывает state/control-flow/reasoning modes/tools/guards/stop-conditions/
-framework-less-спайк — пп. 1 и 2 плана.*
+(п.4 плана, готово); [docs/agent-design-decisions.md](agent-design-decisions.md) — agent vs tool
+vs sub-agent vs deterministic code (п.6 плана, готово). Ещё не написаны (см.
+`projects/warhammerwikibot.md` в личных заметках): `docs/prompt-regression.md`,
+`docs/rnd-decision-log.md`, `docs/agent-framework-comparison.md`. Этот документ описывает
+state/control-flow/reasoning modes/tools/guards/stop-conditions/framework-less-спайк — пп. 1 и 2
+плана.*
