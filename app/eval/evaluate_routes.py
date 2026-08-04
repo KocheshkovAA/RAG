@@ -15,7 +15,9 @@ import json
 import os
 import sys
 import time
+from collections import Counter
 from pathlib import Path
+from typing import Optional
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
 sys.path.insert(0, project_root)
@@ -53,6 +55,117 @@ def _expected_titles_quotes(question_data: dict) -> tuple[list[str], list[str]]:
     return expected_titles, expected_quotes
 
 
+def _refusal_reason(result: dict) -> Optional[str]:
+    """Не просто "отказал", а почему — гейт релевантности, faithfulness-верификация или
+    graph-специфичный режим (LightRAG ответил "нет данных" текстом, а не пустым результатом,
+    см. _is_lightrag_empty_answer в orchestrator.py). Нужно, чтобы отличать "агент отказался,
+    потому что ничего не нашёл" от "нашёл, но Reflection не пропустила ответ"."""
+    guardrail = result.get("guardrail") or {}
+    if not guardrail.get("refused"):
+        return None
+    gate = guardrail.get("retrieval_gate") or {}
+    if gate.get("passed") is False:
+        return f"retrieval_gate:{gate.get('reason', 'unknown')}"
+    faith = guardrail.get("faithfulness") or {}
+    if faith.get("passed") is False:
+        return "faithfulness:" + (faith.get("reason") or "unsupported_claims")
+    mode = result.get("mode")
+    return f"mode:{mode}" if mode else "unknown"
+
+
+def build_result_row(question_data: dict, route: RAGRoute, result: dict) -> dict:
+    """Общая сборка строки для evaluate_routes.py и evaluate_capstone.py — не только
+    "хватило ли контекста" (retrieval-метрики), но и агентные решения: почему отказал,
+    сколько раундов поиска потрачено впустую (retry без новой evidence), включалась ли
+    faithfulness-проверка. Без этого eval видит только конечный результат, а не то, как
+    агент до него дошёл — то, ради чего в первую очередь стоит расширять eval для agentic-
+    маршрута, а не только для retrieval (см. docs/agent-architecture.md)."""
+    token_total = (result.get("token_usage") or {}).get("total") if result.get("token_usage") else None
+    guardrail = result.get("guardrail") or {}
+    agentic_meta = result.get("agentic") or {}
+    faith = guardrail.get("faithfulness") or {}
+
+    tool_calls_made = agentic_meta.get("tool_calls_made") or []
+    rounds = sorted({tc["round"] for tc in tool_calls_made})
+    first_round = rounds[0] if rounds else None
+    retry_calls = [tc for tc in tool_calls_made if first_round is not None and tc["round"] > first_round]
+
+    row = {
+        "id": question_data.get("id"),
+        "question": question_data["question"],
+        "route": route.value,
+        "answer": result.get("answer"),
+        "latency_ms": result.get("latency_ms"),
+        "refused": bool(guardrail.get("refused")),
+        "refusal_reason": _refusal_reason(result),
+        "degraded": result.get("degraded") or [],
+        "token_usage": token_total,
+        "iterations": agentic_meta.get("iterations"),
+        "stopped_reason": agentic_meta.get("stopped_reason"),
+        "tool_calls_total": len(tool_calls_made),
+        "tool_calls_wasted": sum(1 for tc in tool_calls_made if not tc.get("error") and tc.get("new", 0) == 0),
+        "retry_rounds": len({tc["round"] for tc in retry_calls}),
+        "retry_added_evidence": (any(tc.get("new", 0) > 0 for tc in retry_calls) if retry_calls else None),
+        "thought_count": len(agentic_meta.get("thoughts") or []),
+        "faithfulness_checked": bool(faith) and not faith.get("skipped", True),
+        "contexts": [],
+    }
+
+    debug_docs = result.get("_debug_docs")
+    if debug_docs:
+        expected_titles, expected_quotes = _expected_titles_quotes(question_data)
+        retrieved_titles = [d.metadata.get("article_name", "UNKNOWN") for d in debug_docs]
+        retrieved_contents = [d.page_content for d in debug_docs]
+        row["contexts"] = retrieved_contents
+        row.update(
+            compute_retrieval_metrics(retrieved_titles, retrieved_contents, expected_titles, expected_quotes, K_VALUES)
+        )
+
+    return row
+
+
+def compute_agent_decision_aggregates(rows: list[dict]) -> dict:
+    """Агрегаты поверх build_result_row: разбивка причин отказа, как часто faithfulness-
+    проверка реально ловит проблему (а не просто включается), окупается ли retry поиском
+    новых данных. ToT/branching здесь нет метрики намеренно — паттерн не реализован
+    (см. docs/agent-architecture.md, раздел Reasoning modes), нечего измерять."""
+    refusal_reasons = Counter(r["refusal_reason"] for r in rows if r.get("refusal_reason"))
+    faith_checked = [r for r in rows if r.get("faithfulness_checked")]
+    faith_caught = sum(1 for r in faith_checked if (r.get("refusal_reason") or "").startswith("faithfulness"))
+    tool_rows = [r for r in rows if r.get("tool_calls_total")]
+    retry_rows = [r for r in rows if r.get("retry_rounds")]
+    retry_justified = sum(1 for r in retry_rows if r.get("retry_added_evidence"))
+
+    return {
+        "refusal_reasons": dict(refusal_reasons),
+        "faithfulness_check_rate": len(faith_checked) / len(rows) if rows else 0.0,
+        "faithfulness_catch_rate": (faith_caught / len(faith_checked)) if faith_checked else None,
+        "avg_wasted_tool_calls": _mean([r["tool_calls_wasted"] for r in tool_rows]) if tool_rows else None,
+        "retry_occurred_n": len(retry_rows),
+        "retry_justified_rate": (retry_justified / len(retry_rows)) if retry_rows else None,
+    }
+
+
+def print_agent_decision_details(summaries: dict[str, dict]) -> None:
+    for route_name, s in summaries.items():
+        reasons = s.get("refusal_reasons") or {}
+        print(f"\n[{route_name}] причины отказа: {reasons if reasons else '(отказов нет)'}")
+        fc_rate = s.get("faithfulness_check_rate")
+        fcatch_rate = s.get("faithfulness_catch_rate")
+        print(
+            f"[{route_name}] faithfulness: проверялась в {fc_rate:.1%} ответов, "
+            f"поймала проблему в {fcatch_rate:.1%} проверенных" if fcatch_rate is not None
+            else f"[{route_name}] faithfulness: проверялась в {fc_rate:.1%} ответов, проблем не поймано"
+        )
+        if s.get("retry_occurred_n"):
+            rj = s.get("retry_justified_rate")
+            print(
+                f"[{route_name}] retry (>1 раунда поиска): {s['retry_occurred_n']} вопросов, "
+                f"из них оправдан (нашёл новую evidence) в {rj:.1%}; "
+                f"среднее число впустую потраченных tool-раундов: {s.get('avg_wasted_tool_calls'):.2f}"
+            )
+
+
 async def evaluate_question_for_route(orchestrator: WarhammerOrchestrator, question_data: dict, route: RAGRoute) -> dict:
     question = question_data["question"]
     usage_handler = new_usage_handler()
@@ -69,32 +182,7 @@ async def evaluate_question_for_route(orchestrator: WarhammerOrchestrator, quest
     else:
         raise ValueError(f"Unknown route: {route}")
 
-    token_total = (result.get("token_usage") or {}).get("total") if result.get("token_usage") else None
-
-    row = {
-        "id": question_data.get("id"),
-        "question": question,
-        "route": route.value,
-        "answer": result.get("answer"),
-        "latency_ms": result.get("latency_ms"),
-        "refused": bool((result.get("guardrail") or {}).get("refused")),
-        "degraded": result.get("degraded") or [],
-        "token_usage": token_total,
-        "iterations": (result.get("agentic") or {}).get("iterations"),
-        "contexts": [],
-    }
-
-    debug_docs = result.get("_debug_docs")
-    if debug_docs:
-        expected_titles, expected_quotes = _expected_titles_quotes(question_data)
-        retrieved_titles = [d.metadata.get("article_name", "UNKNOWN") for d in debug_docs]
-        retrieved_contents = [d.page_content for d in debug_docs]
-        row["contexts"] = retrieved_contents
-        row.update(
-            compute_retrieval_metrics(retrieved_titles, retrieved_contents, expected_titles, expected_quotes, K_VALUES)
-        )
-
-    return row
+    return build_result_row(question_data, route, result)
 
 
 def _percentile(values: list[float], pct: float) -> float:
@@ -175,6 +263,7 @@ async def run_route(orchestrator: WarhammerOrchestrator, questions: list[dict], 
         "avg_total_tokens": _mean(tokens) if tokens else None,
         "avg_iterations": _mean(iterations) if iterations else None,
         "refusal_rate": refusal_rate,
+        **compute_agent_decision_aggregates(rows),
     }
 
 
@@ -225,6 +314,7 @@ async def main():
         summaries[route.value] = await run_route(orchestrator, questions, route, judge, results_path)
 
     print_comparison_table(summaries)
+    print_agent_decision_details(summaries)
     manifest_path = write_manifest(
         RESULTS_DIR, run_id,
         dataset_path=settings.DATASET_PATH,

@@ -28,10 +28,10 @@ from app.core.agentic_rag import AgenticRAG
 from app.core.lightrag_client import LightRAGClient
 from app.core.orchestrator import WarhammerOrchestrator, RAGRoute
 from app.core.usage import new_usage_handler
-from app.eval.metrics import compute_retrieval_metrics
 from app.eval.evaluate_generation import WarJudge
 from app.eval.evaluate_routes import (
-    K_VALUES, RELEVANT_ROLES, _expected_titles_quotes, _mean, _percentile,
+    RELEVANT_ROLES, _mean, _percentile, build_result_row, compute_agent_decision_aggregates,
+    print_agent_decision_details,
 )
 from app.eval.run_manifest import new_run_id, write_manifest
 
@@ -52,32 +52,7 @@ async def evaluate_question_classified(orchestrator: WarhammerOrchestrator, ques
     else:
         result = await orchestrator._answer_vector(question, usage_handler=usage_handler, include_debug_docs=True)
 
-    token_total = (result.get("token_usage") or {}).get("total") if result.get("token_usage") else None
-
-    row = {
-        "id": question_data.get("id"),
-        "question": question,
-        "route": route.value,
-        "answer": result.get("answer"),
-        "latency_ms": result.get("latency_ms"),
-        "refused": bool((result.get("guardrail") or {}).get("refused")),
-        "degraded": result.get("degraded") or [],
-        "token_usage": token_total,
-        "iterations": (result.get("agentic") or {}).get("iterations"),
-        "contexts": [],
-    }
-
-    debug_docs = result.get("_debug_docs")
-    if debug_docs:
-        expected_titles, expected_quotes = _expected_titles_quotes(question_data)
-        retrieved_titles = [d.metadata.get("article_name", "UNKNOWN") for d in debug_docs]
-        retrieved_contents = [d.page_content for d in debug_docs]
-        row["contexts"] = retrieved_contents
-        row.update(
-            compute_retrieval_metrics(retrieved_titles, retrieved_contents, expected_titles, expected_quotes, K_VALUES)
-        )
-
-    return row
+    return build_result_row(question_data, route, result)
 
 
 async def _evaluate_with_retry(orchestrator: WarhammerOrchestrator, q: dict, max_attempts: int = 4) -> dict:
@@ -169,9 +144,11 @@ async def main():
         "p95_latency_ms": _percentile(latencies, 0.95),
         "avg_total_tokens": _mean(tokens) if tokens else None,
         "refusal_rate": refusal_rate,
+        **compute_agent_decision_aggregates(rows),
     }
 
     print_summary(summary, route_counts)
+    print_agent_decision_details({"classified": summary})
     manifest_path = write_manifest(
         RESULTS_DIR, run_id,
         dataset_path=settings.DATASET_PATH,
