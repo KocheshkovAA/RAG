@@ -47,7 +47,7 @@ Successful, non-degraded, non-refused answers are cached in Redis (`app/core/cac
 
 Two independent gates, both configured in `app/core/config.py`:
 - `RetrievalGate`: drops documents below `RETRIEVAL_MIN_SCORE`/`RERANK_MIN_SCORE` (uses `rerank_score` if present, else `hybrid_score`); empty result after filtering → refusal with `INSUFFICIENT_INFO_MESSAGE`.
-- `AnswerFaithfulnessGuard`: an LLM verifies the generated answer's claims are grounded in the retrieved context. Skipped only when *not* degraded, reranked, and max score ≥ `FAITHFULNESS_SKIP_ABOVE` (0.55–0.80 is treated as a "gray zone" always requiring verification).
+- `AnswerFaithfulnessGuard`: decomposes the answer into atomic claims and grounds each through two independent layers — a cheap verbatim-quote check (`is_quote_grounded`) and a second LLM call verifying the quote actually entails that specific claim, not just that it exists in context (`_check_entailment`). Passes when the fraction of grounded claims ≥ `FAITHFULNESS_MIN_SCORE` (0.7 default). Skipped only when *not* degraded, reranked, and max score ≥ `FAITHFULNESS_SKIP_ABOVE` (0.55–0.72 is treated as a "gray zone" always requiring verification — `FAITHFULNESS_SKIP_ABOVE` is calibrated against this reranker's real score distribution, not a round number; see `docs/rnd-decision-log.md`).
 
 These are the two things `tests/test_guardrails.py` exercises directly (no Docker/LLM needed).
 
