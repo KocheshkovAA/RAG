@@ -119,6 +119,20 @@ sequenceDiagram
 
 Оба guardrail-а (`RetrievalGate`, `AnswerFaithfulnessGuard`) и circuit breaker-ы (`reranker`, `lightrag`, `tei`) — независимые компоненты, отказ одного не валит запрос целиком: система деградирует (например, отвечает без reranking) и явно помечает это полем `degraded` в ответе, а не падает или молчит об ухудшении качества.
 
+## Глубже: архитектура агента, security, R&D-дисциплина
+
+Пять документов вынесены из README, чтобы не раздувать его — но именно они отвечают на вопрос «как устроен агент внутри», а не «что он умеет»:
+
+- [`docs/agent-architecture.md`](docs/agent-architecture.md) — state, control flow, reasoning modes (CoT/ReAct/Reflection — что реализовано, ToT — честно помечено как нет вместо натягивания под buzzword), tools, guards, stop conditions, memory/context management.
+- [`docs/agent-threat-model.md`](docs/agent-threat-model.md) — prompt injection, tool misuse, зацикливание, hallucinated action, context poisoning, избыточные MCP-права; каждая угроза привязана к конкретному механизму защиты в коде, не абстрактно.
+- [`docs/agent-design-decisions.md`](docs/agent-design-decisions.md) — когда достаточно deterministic-кода, когда нужен tool, когда agent, когда sub-agent — на реальных компонентах проекта, не на теории.
+- [`docs/prompt-regression.md`](docs/prompt-regression.md) — какой промпт за что отвечает и что реально проверяет его на регресс; честно документирует живую нестабильность одного из guard'ов, пойманную вживую, а не гипотетическую.
+- [`docs/rnd-decision-log.md`](docs/rnd-decision-log.md) — реальные эксперименты в формате hypothesis → success criteria → experiment → metrics → decision (`kill`/`iterate`/`scale`), не пост-фактум обоснование уже готового решения.
+
+Плюс два маленьких спайка, не подключённых к основному пайплайну (специально — чтобы не превращать pet-проект в multi-agent платформу): framework-less ReAct-цикл без LangGraph/`bind_tools` ([`examples/minimal_agent_loop.py`](examples/minimal_agent_loop.py)) и sub-agent-критик, проводящий границу между guard'ом и sub-agent'ом на практике ([`examples/critic_subagent.py`](examples/critic_subagent.py)) — оба с тестами на фейковом LLM (`tests/test_minimal_agent_loop.py`, `tests/test_critic_subagent.py`).
+
+**Пример вместо общих слов** — цепочка решений из `rnd-decision-log.md`: сначала пытались стабилизировать шумную LLM-проверку через temperature и self-consistency-усреднение — обе попытки не помогли, обе честно зафиксированы как `kill`, а не спрятаны. Разгадка нашлась на уровень выше: порог «можно пропустить дорогую проверку при уверенном retrieval» был откалиброван на score (0.80), которого reranker на этом корпусе физически никогда не достигал (реальный потолок — 0.731) — из-за этого проверка запускалась на 100% ответов вместо расчётных случаев. Пересчитанный порог (0.72) снизил refusal_rate с 60% до 10% и latency почти втрое одним изменением, без компромиссов между метриками. Диагностика перед фиксом оказалась важнее, чем попытки чинить симптом напрямую.
+
 ## Что внутри
 - **Фреймворк**: LangChain + LangGraph (последний — только там, где реально нужна нелинейная топология с общим состоянием, см. [«Дебаты персонажей»](#дебаты-персонажей))
 - **Векторная БД**: Qdrant, hybrid search (dense + sparse BM25, RRF)
