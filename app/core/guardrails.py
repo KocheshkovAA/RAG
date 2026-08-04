@@ -206,6 +206,28 @@ class RetrievalGate:
         }
 
 
+def refusal_reason(result: dict) -> Optional[str]:
+    """Не просто "отказал", а почему — гейт релевантности, faithfulness-верификация или
+    graph-специфичный режим (LightRAG ответил "нет данных" текстом, а не пустым результатом,
+    см. _is_lightrag_empty_answer в orchestrator.py). Общая для eval (app/eval/evaluate_routes.py)
+    и прод-observability логирования (app/core/observability.py) — обе стороны читают один и тот
+    же result-dict пайплайна и не должны разъезжаться в трактовке причины отказа.
+
+    Нужно, чтобы отличать "агент отказался, потому что ничего не нашёл" от "нашёл, но Reflection
+    не пропустила ответ"."""
+    guardrail = result.get("guardrail") or {}
+    if not guardrail.get("refused"):
+        return None
+    gate = guardrail.get("retrieval_gate") or {}
+    if gate.get("passed") is False:
+        return f"retrieval_gate:{gate.get('reason', 'unknown')}"
+    faith = guardrail.get("faithfulness") or {}
+    if faith.get("passed") is False:
+        return "faithfulness:" + (faith.get("reason") or "unsupported_claims")
+    mode = result.get("mode")
+    return f"mode:{mode}" if mode else "unknown"
+
+
 class AnswerFaithfulnessGuard:
     """Пост-проверка с условным пропуском при высокой уверенности retrieval."""
 
@@ -235,12 +257,18 @@ class AnswerFaithfulnessGuard:
                     "Разбей ОТВЕТ на атомарные фактические утверждения (claims): каждое имя, "
                     "дата, номер (легиона, тома, года), число или связь между сущностями — "
                     "отдельным пунктом. Вводные фразы и связки в claims не выделяй.\n"
-                    "Для КАЖДОГО claim найди дословную (verbatim) цитату из КОНТЕКСТА, которая "
-                    "прямо его подтверждает, и укажи её в supporting_quote ТОЧНО как в контексте — "
-                    "без пересказа, без изменения чисел/имён.\n"
-                    "Если в контексте нет дословного подтверждения именно этому утверждению — даже "
-                    "если упоминается похожая или связанная сущность — оставь supporting_quote "
-                    "пустой строкой. Не подставляй правдоподобную, но ненайденную цитату.",
+                    "Для КАЖДОГО claim найди в КОНТЕКСТЕ ОДИН непрерывный фрагмент текста, "
+                    "подтверждающий его, и скопируй его в supporting_quote СИМВОЛ В СИМВОЛ — "
+                    "как если бы ты выделил его мышью и скопировал, а не пересказал своими "
+                    "словами. Не переставляй слова, не меняй порядок предложений, не сокращай "
+                    "и не склеивай куски из разных, не идущих подряд мест контекста в одну "
+                    "цитату — если подтверждение раскидано по двум несмежным местам, выбери "
+                    "ОДНО из них, содержащее суть claim'а, а не обе части сразу.\n"
+                    "Если не можешь найти именно такой непрерывный дословный фрагмент — даже "
+                    "если факт кажется тебе очевидным или похожая сущность упоминается — оставь "
+                    "supporting_quote пустой строкой. Пустая цитата — это нормально и ожидаемо "
+                    "чаще, чем неточная; не подставляй правдоподобную, но не найденную дословно "
+                    "цитату, и не подставляй перефразированную цитату вместо честной пустой строки.",
                 ),
                 (
                     "human",
@@ -384,7 +412,16 @@ class AnswerFaithfulnessGuard:
         faithfulness_score = 1.0 if total_claims == 0 else (total_claims - len(unsupported)) / total_claims
         is_grounded = len(unsupported) == 0
 
-        passed = is_grounded and faithfulness_score >= self.min_score
+        # Порог по score, не all-or-nothing: с zero-tolerance (passed = is_grounded and ...)
+        # min_score был мёртвым кодом — is_grounded уже требовал unsupported == 0, из-за
+        # чего score всегда оказывался либо 1.0 (grounded), либо ниже порога (not grounded),
+        # так что >= min_score никогда не решал ничего самостоятельно. На живом прогоне (10
+        # vector-вопросов) zero-tolerance давал 60% refusal_rate — модель почти всегда даёт
+        # ХОТЯ БЫ одну неидеально дословную цитату среди 5-7 claims, и одна такая цитата
+        # рушила весь ответ, даже когда остальные claims были безупречно подтверждены.
+        # min_score (0.7 по умолчанию) — реальный, настраиваемый допуск: до 30% claims
+        # могут не пройти строгую проверку цитаты, не проваливая ответ целиком.
+        passed = faithfulness_score >= self.min_score
         meta = {
             "enabled": True,
             "passed": passed,

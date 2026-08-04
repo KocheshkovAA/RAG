@@ -373,3 +373,40 @@ async def test_verify_skips_entailment_call_for_claims_with_fabricated_quote():
     assert passed is False
     assert meta["unsupported_claims"] == ["Выдуманный факт"]
     assert all(schema is not EntailmentCheck for schema, _ in fake_llm.calls)
+
+
+async def test_verify_passes_on_score_threshold_despite_one_unsupported_claim():
+    """Регресс: раньше passed требовал is_grounded (ВСЕ claims подтверждены), из-за чего
+    min_score был мёртвым кодом — на живом прогоне (10 vector-вопросов) это давало 60%
+    refusal_rate, потому что модель почти всегда даёт хотя бы одну неидеально дословную
+    цитату среди 5-7 claims. Теперь порог по faithfulness_score: 2 из 3 claims
+    подтверждены (0.667) >= min_score(0.6) — должно пройти, хотя is_grounded всё ещё
+    False (используется только как информационное поле в meta, не как gate)."""
+    guard = AnswerFaithfulnessGuard(enabled=True, min_score=0.6)
+    doc = Document(
+        page_content="Магнус — примарх XV легиона. Магнус — киклоп. Магнус владеет магией.",
+        metadata={"rerank_score": 0.9},
+    )
+    verdict = FaithfulnessVerdict(
+        claims=[
+            AtomicClaim(claim="Магнус — примарх XV легиона", supporting_quote="Магнус — примарх XV легиона."),
+            AtomicClaim(claim="Магнус — киклоп", supporting_quote="Магнус — киклоп."),
+            AtomicClaim(claim="Магнус — бог хаоса", supporting_quote="выдуманная цитата, которой нет в контексте"),
+        ],
+        reasoning="...",
+    )
+    guard.llm = _FakeStructuredLLM(
+        {
+            FaithfulnessVerdict: verdict,
+            EntailmentCheck: EntailmentCheck(
+                verdicts=[ClaimEntailment(entailed=True), ClaimEntailment(entailed=True)]
+            ),
+        }
+    )
+
+    passed, _verdict, meta = await guard.verify("вопрос", "ответ", [doc])
+
+    assert passed is True
+    assert meta["is_grounded"] is False  # информационно всё ещё False — не всё подтверждено
+    assert meta["unsupported_claims"] == ["Магнус — бог хаоса"]
+    assert meta["faithfulness_score"] == round(2 / 3, 4)
