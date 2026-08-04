@@ -2,8 +2,11 @@
 агрегаты по агентным решениям) — без LLM/сети/Docker, только на синтетических result-дictах
 в форме, которую реально отдают RAG.answer()/AgenticRAG.answer()/orchestrator._answer_graph()."""
 
+import pytest
+
 from app.core.guardrails import refusal_reason
 from app.core.orchestrator import RAGRoute
+from app.eval import evaluate_routes
 from app.eval.evaluate_routes import (
     build_result_row,
     compute_agent_decision_aggregates,
@@ -168,3 +171,80 @@ def test_compute_agent_decision_aggregates_counts_reasons_and_retry():
     assert agg["retry_occurred_n"] == 2
     assert agg["retry_justified_rate"] == 1 / 2
     assert agg["avg_wasted_tool_calls"] == (0 + 1 + 0) / 3
+
+
+# --------------------------------------------------------------------------- _evaluate_with_retry
+
+
+async def test_evaluate_with_retry_succeeds_without_retry(monkeypatch):
+    async def _fake(orchestrator, q, route):
+        return {"answer": "ok"}
+
+    monkeypatch.setattr(evaluate_routes, "evaluate_question_for_route", _fake)
+
+    result = await evaluate_routes._evaluate_with_retry(None, {"id": 1}, RAGRoute.VECTOR)
+
+    assert result == {"answer": "ok"}
+
+
+async def test_evaluate_with_retry_retries_on_generic_exception(monkeypatch):
+    """Регресс: полный 60-вопросный прогон потерял строку на 'NoneType' object is not
+    iterable — не воспроизвелось на изолированном повторе, транзиентный сбой. Раньше
+    ретраилось только по тексту 'rate limit', любая другая ошибка падала с первой попытки."""
+    calls = []
+
+    async def _fake(orchestrator, q, route):
+        calls.append(1)
+        if len(calls) < 2:
+            raise TypeError("'NoneType' object is not iterable")
+        return {"answer": "ok"}
+
+    sleeps = []
+
+    async def _fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(evaluate_routes, "evaluate_question_for_route", _fake)
+    monkeypatch.setattr(evaluate_routes.asyncio, "sleep", _fake_sleep)
+
+    result = await evaluate_routes._evaluate_with_retry(None, {"id": 31}, RAGRoute.VECTOR)
+
+    assert result == {"answer": "ok"}
+    assert len(calls) == 2
+    assert sleeps == [3]  # не rate-limit -> короткий backoff (3с), не 15*2^0=15с
+
+
+async def test_evaluate_with_retry_uses_longer_backoff_for_rate_limit(monkeypatch):
+    calls = []
+
+    async def _fake(orchestrator, q, route):
+        calls.append(1)
+        if len(calls) < 2:
+            raise RuntimeError("429 Too Many Requests")
+        return {"answer": "ok"}
+
+    sleeps = []
+
+    async def _fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(evaluate_routes, "evaluate_question_for_route", _fake)
+    monkeypatch.setattr(evaluate_routes.asyncio, "sleep", _fake_sleep)
+
+    await evaluate_routes._evaluate_with_retry(None, {"id": 1}, RAGRoute.VECTOR)
+
+    assert sleeps == [15]  # rate-limit -> экспоненциальный backoff, 15 * 2**0
+
+
+async def test_evaluate_with_retry_gives_up_after_max_attempts(monkeypatch):
+    async def _fake(orchestrator, q, route):
+        raise TypeError("boom")
+
+    async def _fake_sleep(seconds):
+        pass
+
+    monkeypatch.setattr(evaluate_routes, "evaluate_question_for_route", _fake)
+    monkeypatch.setattr(evaluate_routes.asyncio, "sleep", _fake_sleep)
+
+    with pytest.raises(TypeError, match="boom"):
+        await evaluate_routes._evaluate_with_retry(None, {"id": 1}, RAGRoute.VECTOR, max_attempts=2)

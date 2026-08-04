@@ -183,17 +183,24 @@ def _mean(values: list[float]) -> float:
 async def _evaluate_with_retry(orchestrator: WarhammerOrchestrator, q: dict, route: RAGRoute,
                                 max_attempts: int = 4) -> dict:
     """GigaChat отдаёт 429 под нагрузкой полного 56-вопросного прогона (не
-    наблюдается на маленьких sample-прогонах) — экспоненциальный backoff
-    только для rate-limit, чтобы не терять строки результата на ровном месте."""
+    наблюдается на маленьких sample-прогонах) — экспоненциальный backoff для rate-limit.
+
+    Retry также и на прочих исключениях (короче backoff) — регресс: полный 60-вопросный
+    прогон один раз потерял строку на 'NoneType' object is not iterable, не
+    воспроизвелось на изолированном повторе того же вопроса сразу после — похоже на
+    разовый транзиентный сбой конкретного LLM-вызова под нагрузкой, не системную ошибку.
+    Раньше такие ошибки не ретраились вообще (условие ловило только rate-limit по тексту),
+    из-за чего одна такая накладка молча теряла строку из отчёта и слегка смещала агрегаты."""
     for attempt in range(max_attempts):
         try:
             return await evaluate_question_for_route(orchestrator, q, route)
         except Exception as e:
-            is_rate_limit = "429" in str(e) or "Too Many Requests" in str(e)
-            if not is_rate_limit or attempt == max_attempts - 1:
+            if attempt == max_attempts - 1:
                 raise
-            wait_s = 15 * (2 ** attempt)
-            print(f"  [{route.value}] q{q.get('id')} rate-limited, retry {attempt + 1}/{max_attempts} in {wait_s}s")
+            is_rate_limit = "429" in str(e) or "Too Many Requests" in str(e)
+            wait_s = 15 * (2 ** attempt) if is_rate_limit else 3 * (attempt + 1)
+            reason = "rate-limited" if is_rate_limit else f"error ({type(e).__name__}: {e})"
+            print(f"  [{route.value}] q{q.get('id')} {reason}, retry {attempt + 1}/{max_attempts} in {wait_s}s")
             await asyncio.sleep(wait_s)
 
 
