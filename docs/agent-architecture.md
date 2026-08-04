@@ -294,8 +294,8 @@ LLM через `bind_tools`-схему (`SearchKnowledgeBase`), проверяе
 
 *Связанные документы: [docs/agent-threat-model.md](agent-threat-model.md) — security/failure modes
 (п.4 плана, готово); [docs/agent-design-decisions.md](agent-design-decisions.md) — agent vs tool
-vs sub-agent vs deterministic code (п.6 плана, готово). Ещё не написаны (см.
-`projects/warhammerwikibot.md` в личных заметках): `docs/prompt-regression.md`,
-`docs/rnd-decision-log.md`, `docs/agent-framework-comparison.md`. Этот документ описывает
+vs sub-agent vs deterministic code (п.6 плана, готово); [docs/prompt-regression.md](prompt-regression.md)
+и [docs/rnd-decision-log.md](rnd-decision-log.md) — п.8 плана, готово. Ещё не написан:
+`docs/agent-framework-comparison.md` (п.9 плана). Этот документ описывает
 state/control-flow/reasoning modes/tools/guards/stop-conditions/framework-less-спайк/memory —
 пп. 1, 2 и 7 плана.*

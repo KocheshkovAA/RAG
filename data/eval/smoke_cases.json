@@ -1,0 +1,56 @@
+[
+  {
+    "id": "offtopic_spongebob",
+    "question": "Кто первый предал Губку Боба?",
+    "expect": {
+      "refused": true,
+      "refuse_stage": "retrieval_gate",
+      "max_latency_ms": 20000
+    }
+  },
+  {
+    "id": "offtopic_cooking",
+    "question": "Как приготовить борщ?",
+    "expect": {
+      "refused": true,
+      "refuse_stage": "retrieval_gate",
+      "max_latency_ms": 25000
+    }
+  },
+  {
+    "id": "simple_fact_abaddon",
+    "question": "Как Чернокаменные крепости связаны с Абаддоном?",
+    "expect": {
+      "refused": false,
+      "answer_must_contain_any": ["Абаддон", "Абадд", "Чернокамен", "крепост", "Blackstone"],
+      "max_latency_ms": 90000
+    }
+  },
+  {
+    "id": "emptyish_query",
+    "question": "asdfghjkl qwerty 12345",
+    "expect": {
+      "refused": true,
+      "refuse_stage": "retrieval_gate",
+      "max_latency_ms": 25000
+    }
+  },
+  {
+    "id": "faithfulness_strictness_necrons",
+    "question": "Кто такие некроны?",
+    "expect": {
+      "refused": false,
+      "answer_must_contain_any": ["некрон", "Некрон"],
+      "max_latency_ms": 90000
+    }
+  },
+  {
+    "id": "faithfulness_strictness_viliar_ifiss",
+    "question": "Кто такая Вилиар Ифисс?",
+    "expect": {
+      "refused": false,
+      "answer_must_contain_any": ["Вилиар", "Комморр", "гладиатр", "Распри"],
+      "max_latency_ms": 90000
+    }
+  }
+]
