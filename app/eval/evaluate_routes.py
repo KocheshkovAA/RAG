@@ -9,6 +9,8 @@
 чтобы в сравнении не было стоимости/вариативности роутера.
 """
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import json
@@ -17,7 +19,7 @@ import sys
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
 sys.path.insert(0, project_root)
@@ -25,14 +27,18 @@ sys.path.insert(0, project_root)
 from app.core.config import settings
 from app.core.guardrails import refusal_reason
 from app.core.llm import resolve_role_config
-from app.core.vectorrag import rag_chain
-from app.core.agentic_rag import AgenticRAG
-from app.core.lightrag_client import LightRAGClient
 from app.core.orchestrator import WarhammerOrchestrator, RAGRoute
 from app.core.usage import new_usage_handler
 from app.eval.metrics import compute_retrieval_metrics
-from app.eval.evaluate_generation import WarJudge
 from app.eval.run_manifest import new_run_id, write_manifest
+
+if TYPE_CHECKING:
+    # Ниже — тяжёлый хвост (vectorrag.py -> retriever.py -> langchain_qdrant/fastembed),
+    # который не нужен для чистой юнит-логики этого модуля (build_result_row,
+    # compute_agent_decision_aggregates, _evaluate_with_retry) и отсутствует в
+    # requirements-test.txt намеренно — импорт только для тайп-хинтов, реальный
+    # импорт лежит в main(), где он и раньше был единственным потребителем.
+    from app.eval.evaluate_generation import WarJudge
 
 K_VALUES = [3, 5, 10, 20]
 RESULTS_DIR = Path(project_root) / "app/eval/results"
@@ -279,6 +285,14 @@ def print_comparison_table(summaries: dict[str, dict]):
 
 
 async def main():
+    # Локально, а не на уровне модуля: тянет vectorrag.py -> retriever.py ->
+    # langchain_qdrant/fastembed — тяжёлый хвост, не нужный юнит-тестам чистой логики
+    # (см. TYPE_CHECKING-блок выше и комментарий в requirements-test.txt).
+    from app.core.vectorrag import rag_chain
+    from app.core.agentic_rag import AgenticRAG
+    from app.core.lightrag_client import LightRAGClient
+    from app.eval.evaluate_generation import WarJudge
+
     parser = argparse.ArgumentParser(description="Сравнение vector/graph/agentic маршрутов")
     parser.add_argument(
         "--routes", default="vector,agentic",
