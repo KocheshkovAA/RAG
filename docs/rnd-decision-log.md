@@ -113,6 +113,8 @@ few-shot примеры дословного копирования в пром�
 
 **Metrics** (сводная таблица по всей цепочке решений этого дня):
 
+![Цепочка решений по AnswerFaithfulnessGuard: refusal_rate и латентность на каждом шаге](assets/faithfulness_tuning.png)
+
 | Версия | refusal_rate | faithfulness проверялась | avg latency | avg tokens |
 |---|---|---|---|---|
 | Zero-tolerance (исходно) | 60% | 100% | ~11с | — |
