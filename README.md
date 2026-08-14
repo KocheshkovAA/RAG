@@ -117,14 +117,6 @@ sequenceDiagram
 
 Оба guardrail-а (`RetrievalGate`, `AnswerFaithfulnessGuard`) и circuit breaker-ы (`reranker`, `lightrag`, `tei`) — независимые компоненты, отказ одного не валит запрос целиком: система деградирует (например, отвечает без reranking) и явно помечает это полем `degraded` в ответе, а не падает или молчит об ухудшении качества.
 
-## Архитектура агента, security, R&D-дисциплина
-
-
-- [`docs/agent-architecture.md`](docs/agent-architecture.md) — state, control flow, reasoning modes (CoT/ReAct/Reflection — что реализовано), tools, guards, stop conditions, memory/context management.
-- [`docs/agent-threat-model.md`](docs/agent-threat-model.md) — prompt injection, tool misuse, зацикливание, hallucinated action, context poisoning.
-- [`docs/rnd-decision-log.md`](docs/rnd-decision-log.md) — эксперименты в формате hypothesis → success criteria → experiment → metrics → decision .
-
-
 ## Что внутри
 - **Фреймворк**: LangChain + LangGraph ([«Дебаты персонажей»](#дебаты-персонажей))
 - **Векторная БД**: Qdrant, hybrid search (dense + sparse BM25, RRF)
